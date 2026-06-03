@@ -1,0 +1,17 @@
+MalwareCleanup Pro - Licencia de Uso
+
+Copyright (c) 2026 MalwareCleanup
+
+Se concede permiso, de forma gratuita, para usar, copiar, modificar y distribuir
+este software con fines de seguridad informática y limpieza de malware.
+
+Este software se proporciona "tal cual", sin garantía de ningún tipo, expresa o
+implícita. En ningún caso los autores serán responsables de cualquier daño
+derivado del uso de este software.
+
+El usuario es responsable de mantener copias de seguridad antes de ejecutar
+cualquier proceso de limpieza automática.
+
+USO AUTORIZADO: Este software está diseñado exclusivamente para la limpieza
+de malware en copias de seguridad propias. No debe utilizarse para acceder
+a sistemas o datos sin autorización.
