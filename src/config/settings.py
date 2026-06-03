@@ -5,7 +5,7 @@ import multiprocessing
 from pathlib import Path
 
 APP_NAME = "cPacleanS"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 
 SCAN_MODE_ONLY = "scan_only"
 CLEAN_MODE_NORMAL = "normal"
@@ -15,6 +15,7 @@ CLEAN_MODE_STRICT = "strict"
 DEFAULT_CONFIG = {
     "virustotal_api_key": "",
     "max_file_size_mb": 50,
+    "critical_only": False,
     "scan_workers": max(1, multiprocessing.cpu_count() - 1),
     "auto_clean": False,
     "quarantine_enabled": True,

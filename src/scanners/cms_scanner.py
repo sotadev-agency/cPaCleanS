@@ -58,11 +58,67 @@ CMS_CHECKS = {
 }
 
 KNOWN_MALICIOUS_PLUGINS = [
-    "revslider",
+    # ── WordPress: shells / backdoors disfrazados de plugins ──
+    "wp-file-manager",             # CVE-2020-25213 — RCE sin autenticacion (explotado masivamente)
+    "revslider",                   # Versiones nulled = backdoor; historico CVE-2014-9734
     "gravityforms-nulled",
     "developer-tools-hacked",
     "super-socializer-exploit",
-    "wp-file-manager",
+
+    # ── WordPress: permiten ejecucion de PHP arbitrario ──
+    "php-everywhere",              # CVE-2022-24663 — ejecuta PHP en cualquier widget/post
+    "insert-php",                  # Permite PHP raw en posts
+    "insert-php-code-snippet",
+    "exec-php",
+    "run-php",
+    "allow-php-in-posts-and-pages",
+    "wp-php-widget",
+
+    # ── WordPress: file managers / acceso directo al sistema de archivos ──
+    "wp-file-manager-pro",
+    "file-manager-advanced",
+    "file-manager-advanced-shortcode",
+    "adminer",                     # phpMyAdmin alternativo — DB expuesto sin auth si mal configurado
+
+    # ── WordPress: CVEs criticos explotados en campanas masivas ──
+    "wp-automatic",                # SQLi + file upload RCE (explotado 2024)
+    "yuzo-related-post",           # CVE-2019-6715 — PHP object injection
+    "social-warfare",              # CVE-2019-9978 — RCE via stored XSS
+    "yellow-pencil-visual-theme-customizer",  # CVE-2019-9943 — privilege escalation
+    "wp-gdpr-compliance",          # CVE-2018-19207 — subscriber → admin
+    "total-donations",             # Abandonado con file upload RCE
+    "simple-file-list",            # CVE-2022-1119 — file upload sin autenticacion
+    "instabuilder",                # Shell upload
+    "coming-soon-page",
+    "simple-social-buttons",
+
+    # ── WordPress: plugins fake con nombres genericos sospechosos ──
+    "wordpress-backup-free",
+    "system-update-manager",
+    "plugin-activator",
+    "site-manager-pro",
+    "admin-tools-manager",
+    "wp-config-editor",
+    "database-manager-pro",
+    "wordpress-optimizer",
+    "wp-performance-booster",
+
+    # ── WordPress: versiones nulled de plugins premium conocidos ──
+    "elementor-pro-nulled",
+    "acf-pro-nulled",
+    "wpbakery-nulled",
+    "divi-theme-nulled",
+    "avada-nulled",
+    "the7-nulled",
+    "bebuilder-nulled",
+    "salient-nulled",
+
+    # ── Joomla: extensiones con historial de RCE / SQLi ──
+    "com_extplorer",               # File manager — RCE si accesible publicamente
+    "com_jce",                     # JCE editor — versiones viejas con file upload
+    "com_fabrik",                  # SQLi historico
+    "mod_wrapper",                 # Puede inyectar iframes arbitrarios
+    "com_media-fake",
 ]
 
 

@@ -53,6 +53,9 @@ class ScanResult:
     cms_restore_log: list = field(default_factory=list)
     clean_mode_used: str = ""
     workers_used: int = 0
+    # v2.2.0 — filtro de rutas criticas
+    critical_only_mode: bool = False
+    omitted_paths_count: int = 0
 
 
 # --- Multiprocessing worker con scanners persistentes por proceso ---
@@ -95,19 +98,24 @@ class ScanEngine:
     def cancel(self):
         self._cancelled = True
 
-    def scan_directory(self, directory: str, backup_info=None) -> ScanResult:
+    def scan_directory(self, directory: str, backup_info=None, critical_only: bool = False) -> ScanResult:
         start_time = time.time()
         directory = Path(directory)
 
         if backup_info:
             self.result.cms_detected = backup_info.cms_detected
 
-        files_to_scan = self._collect_files(directory)
+        self.result.critical_only_mode = critical_only
+        files_to_scan, omitted = self._collect_files(directory, critical_only=critical_only)
+        self.result.omitted_paths_count = omitted
         total = len(files_to_scan)
         workers = min(self.config.get("scan_workers", 4), multiprocessing.cpu_count(), 16)
         self.result.workers_used = workers
 
-        self.progress_callback("status", f"Escaneando {total} archivos con {workers} workers...")
+        status_msg = f"Escaneando {total} archivos con {workers} workers..."
+        if critical_only and omitted:
+            status_msg += f" ({omitted} rutas de sistema omitidas)"
+        self.progress_callback("status", status_msg)
 
         batch_size = max(50, total // (workers * 4))
         batches = [files_to_scan[i:i + batch_size] for i in range(0, total, batch_size)]
@@ -209,7 +217,8 @@ class ScanEngine:
                 except Exception:
                     pass
 
-    def _collect_files(self, directory: Path) -> list:
+    def _collect_files(self, directory: Path, critical_only: bool = False) -> tuple:
+        """Recopila archivos a escanear. Retorna (archivos, omitidos)."""
         all_extensions = set()
         for exts in self.config["scan_extensions"].values():
             all_extensions.update(exts)
@@ -242,7 +251,11 @@ class ScanEngine:
                     except OSError:
                         pass
 
-        return files
+        if critical_only:
+            from .path_filter import filter_files
+            return filter_files(files, critical_only=True)
+
+        return files, 0
 
     def setup_quarantine(self, base_dir: str) -> str:
         ts = time.strftime("%Y%m%d_%H%M%S")

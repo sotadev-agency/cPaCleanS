@@ -1,4 +1,4 @@
-"""Interfaz grafica de cPacleanS v2.0 — con log de fases, bloqueo de controles y cancelacion segura."""
+"""Interfaz grafica de cPacleanS v2.2 — con log de fases, bloqueo de controles y cancelacion segura."""
 import os
 import re
 import sys
@@ -53,6 +53,7 @@ class CpacleanSApp(ctk.CTk):
         self._report_path = None
         self._pdf_path = None
         self._is_running = False
+        self._critical_only = False  # capturado antes de lanzar el hilo
 
         self._build_ui()
 
@@ -112,6 +113,16 @@ class CpacleanSApp(ctk.CTk):
                         variable=self.gen_pdf_var, font=ctk.CTkFont(size=11))
         self.chk_pdf.pack(side="left", padx=12, pady=6)
 
+        self.critical_only_var = ctk.BooleanVar(value=False)
+        self.chk_critical = ctk.CTkCheckBox(
+            opts,
+            text="Solo contenido critico\n(public_html, mail, SQL)",
+            variable=self.critical_only_var,
+            font=ctk.CTkFont(size=10),
+            text_color="#33b5e5",
+        )
+        self.chk_critical.pack(side="left", padx=12, pady=6)
+
         self.cancel_btn = ctk.CTkButton(opts, text="CANCELAR", width=110, command=self._cancel_scan,
                                          state="disabled", fg_color="#cc3300", hover_color="#ff4400",
                                          font=ctk.CTkFont(size=13, weight="bold"))
@@ -167,6 +178,7 @@ class CpacleanSApp(ctk.CTk):
         self.file_entry.configure(state="disabled")
         self.chk_restore.configure(state="disabled")
         self.chk_pdf.configure(state="disabled")
+        self.chk_critical.configure(state="disabled")
         for rb in self._mode_radios:
             rb.configure(state="disabled")
         self.report_btn.configure(state="disabled")
@@ -180,6 +192,7 @@ class CpacleanSApp(ctk.CTk):
         self.file_entry.configure(state="normal")
         self.chk_restore.configure(state="normal")
         self.chk_pdf.configure(state="normal")
+        self.chk_critical.configure(state="normal")
         for rb in self._mode_radios:
             rb.configure(state="normal")
         self.cancel_btn.configure(state="disabled")
@@ -221,6 +234,9 @@ class CpacleanSApp(ctk.CTk):
             messagebox.showerror("Error", "Seleccione un archivo de backup valido.")
             return
 
+        # Capturar opciones antes de bloquear la UI (seguro desde el hilo principal)
+        self._critical_only = self.critical_only_var.get()
+
         self._lock_ui()
         self.log_text.delete("1.0", "end")
         self.progress_bar.set(0)
@@ -237,8 +253,11 @@ class CpacleanSApp(ctk.CTk):
             is_clean = mode != SCAN_MODE_ONLY
             clean_mode = mode if is_clean else None
 
+            critical_only = self._critical_only
             self._safe_log(f"  {APP_NAME} v{APP_VERSION} | {MODE_LABELS.get(mode, mode)}")
             self._safe_log(f"  {multiprocessing.cpu_count()} CPUs | Backup: {Path(backup_path).name}")
+            if critical_only:
+                self._safe_log("  [MODO CRITICO] Solo public_html, mail y SQL seran escaneados")
 
             # ── FASE 1 ──
             self._safe_phase(1, "Extraccion del backup")
@@ -264,12 +283,14 @@ class CpacleanSApp(ctk.CTk):
             self._engine = engine
             for cls in SCANNER_CLASSES:
                 engine.register_scanner_class(cls)
-            result = engine.scan_directory(info.extract_dir, backup_info=info)
+            result = engine.scan_directory(info.extract_dir, backup_info=info, critical_only=critical_only)
             self._scan_result = result
 
             confirmed = sum(1 for f in result.findings if f.confirmed_malware)
             suspect = result.total_threats_found - confirmed
             self._safe_result(f"{result.total_files_scanned} archivos en {result.scan_duration_seconds}s ({result.workers_used} workers)")
+            if result.omitted_paths_count:
+                self._safe_detail(f"Modo critico: {result.omitted_paths_count} archivos de sistema omitidos (logs, ssl, ips, etc.)")
             self._safe_result(f"Detecciones: {result.total_threats_found} total")
             self._safe_detail(f"CONFIRMADOS (malware real): {confirmed}")
             self._safe_detail(f"Sospechosos (solo reporte): {suspect}")
@@ -563,9 +584,23 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkLabel(frame, text="Premium: sin limites, analisis profundo con upload de archivos sospechosos",
                      font=ctk.CTkFont(size=10), text_color="#8892b0", wraplength=480).pack(padx=16, anchor="w")
         self.vt_entry = ctk.CTkEntry(frame, width=460, show="*", placeholder_text="Obtener en virustotal.com > Perfil > API key")
-        self.vt_entry.pack(padx=16, pady=(4, 4))
+        self.vt_entry.pack(padx=16, pady=(4, 2))
         if self.config.get("virustotal_api_key"):
             self.vt_entry.insert(0, self.config["virustotal_api_key"])
+
+        vt_btn_row = ctk.CTkFrame(frame, fg_color="transparent")
+        vt_btn_row.pack(padx=16, anchor="w", pady=(2, 8))
+        ctk.CTkButton(vt_btn_row, text="Mostrar/ocultar", width=120,
+                      command=self._toggle_vt_visibility,
+                      fg_color="#2a2a4a", hover_color="#3a3a5a",
+                      font=ctk.CTkFont(size=10)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(vt_btn_row, text="Validar key →", width=110,
+                      command=self._validate_vt_key,
+                      fg_color="#0f3460", hover_color="#1a4f8a",
+                      font=ctk.CTkFont(size=10)).pack(side="left", padx=(0, 8))
+        self.vt_status = ctk.CTkLabel(vt_btn_row, text="",
+                                       font=ctk.CTkFont(size=10), text_color="#8892b0")
+        self.vt_status.pack(side="left")
 
         self.vt_mode_var = ctk.StringVar(value=self.config.get("vt_mode", "confirm"))
         vt_frame = ctk.CTkFrame(frame, fg_color="transparent")
@@ -610,6 +645,43 @@ class SettingsWindow(ctk.CTkToplevel):
         bf.pack(pady=8)
         ctk.CTkButton(bf, text="Guardar", width=110, command=self._save, fg_color="#00a86b").pack(side="left", padx=8)
         ctk.CTkButton(bf, text="Cancelar", width=110, command=self.destroy, fg_color="#555").pack(side="left", padx=8)
+
+    def _toggle_vt_visibility(self):
+        current = self.vt_entry.cget("show")
+        self.vt_entry.configure(show="" if current == "*" else "*")
+
+    def _validate_vt_key(self):
+        import threading as _threading
+        key = self.vt_entry.get().strip()
+        if not key:
+            self.vt_status.configure(text="Ingresa una key primero", text_color="#ffbb33")
+            return
+        self.vt_status.configure(text="Validando...", text_color="#8892b0")
+        self.update()
+
+        def do_check():
+            try:
+                import requests as _req
+                # Consulta el hash de EICAR — siempre presente en VT
+                resp = _req.get(
+                    "https://www.virustotal.com/api/v3/files/"
+                    "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f",
+                    headers={"x-apikey": key},
+                    timeout=12,
+                )
+                if resp.status_code == 200:
+                    msg, color = "✓ Key valida", "#00C851"
+                elif resp.status_code == 401:
+                    msg, color = "✗ Key invalida (401)", "#ff4444"
+                elif resp.status_code == 429:
+                    msg, color = "✓ Valida (limite por minuto)", "#ffbb33"
+                else:
+                    msg, color = f"⚠ HTTP {resp.status_code}", "#ffbb33"
+            except Exception as e:
+                msg, color = f"✗ {str(e)[:32]}", "#ff4444"
+            self.after(0, lambda: self.vt_status.configure(text=msg, text_color=color))
+
+        _threading.Thread(target=do_check, daemon=True).start()
 
     def _save(self):
         self.config["virustotal_api_key"] = self.vt_entry.get().strip()

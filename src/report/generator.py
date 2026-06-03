@@ -5,6 +5,7 @@ from pathlib import Path
 from jinja2 import Environment
 
 from ..core.engine import ScanResult
+from ..config.settings import APP_VERSION
 
 
 def truncate_path(path, max_len=55):
@@ -90,9 +91,25 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     <div class="header">
         <h1>cPacleanS - Reporte de Seguridad</h1>
         <p>{{ generated_at }} &bull; {{ result.total_files_scanned }} archivos &bull; {{ result.scan_duration_seconds }}s &bull; {{ result.workers_used }} workers
-        {% if result.clean_mode_used %} &bull; Modo: <strong>{{ result.clean_mode_used|upper }}</strong>{% endif %}</p>
+        {% if result.clean_mode_used %} &bull; Modo: <strong>{{ result.clean_mode_used|upper }}</strong>{% endif %}
+        {% if result.critical_only_mode %} &bull; <span style="color:#33b5e5;">Solo contenido critico</span>{% endif %}</p>
         <p style="margin-top:4px;">Backup: {{ backup_path|short_name }}</p>
     </div>
+
+    {% if result.critical_only_mode %}
+    <div class="box" style="border-color:#0f3460; background:#12122a;">
+        <h2 style="color:#33b5e5;">Modo Solo Contenido Critico</h2>
+        <p style="color:#8892b0; font-size:12px; margin-top:4px;">
+            Solo se escanearon rutas restaurables manualmente al hosting
+            (<strong style="color:#c0c0c0;">public_html</strong>,
+            <strong style="color:#c0c0c0;">mail</strong>,
+            <strong style="color:#c0c0c0;">bases de datos SQL</strong>,
+            <strong style="color:#c0c0c0;">moodledata</strong>).
+            <strong style="color:#fff;">{{ result.omitted_paths_count }}</strong> archivos de sistema omitidos
+            (ips, logs, ssl, bandwidth, etc. &mdash; cPanel los recrea automaticamente al restaurar la cuenta).
+        </p>
+    </div>
+    {% endif %}
 
     <div class="cards">
         <div class="card c-crit"><div class="num">{{ result.summary_by_severity.get('critical', 0) }}</div><div class="lbl">Criticos</div></div>
@@ -180,7 +197,7 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     </div>
     {% endif %}
 
-    <div class="footer">cPacleanS v2.0.0 &bull; {{ generated_at }}</div>
+    <div class="footer">cPacleanS v{{ app_version }} &bull; {{ generated_at }}</div>
 </div>
 </body>
 </html>"""
@@ -209,7 +226,7 @@ class ReportGenerator:
         html = template.render(
             result=result, findings_sorted=findings_sorted, confirmed_count=confirmed_count,
             generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            backup_path=backup_path, max_cat=max_cat,
+            backup_path=backup_path, max_cat=max_cat, app_version=APP_VERSION,
         )
         output_path.write_text(html, encoding="utf-8")
         return str(output_path)
@@ -265,6 +282,10 @@ class ReportGenerator:
         if result.clean_mode_used:
             modes_es = {"normal": "Normal (solo confirmados)", "intermediate": "Intermedio", "strict": "Estricto (todo)"}
             lines.append(f"Modo de limpieza: {modes_es.get(result.clean_mode_used, result.clean_mode_used)}.")
+        if getattr(result, "critical_only_mode", False) and getattr(result, "omitted_paths_count", 0) > 0:
+            lines.append("")
+            lines.append(f"Modo Solo Contenido Critico activo: {result.omitted_paths_count} archivos de")
+            lines.append("sistema omitidos (logs, ssl, bandwidth — cPanel los recrea al restaurar).")
 
         for line in lines:
             pdf.cell(0, 6, self._safe_text(line))
@@ -388,7 +409,7 @@ class ReportGenerator:
         pdf.set_y(-20)
         pdf.set_font("Helvetica", "I", 7)
         pdf.set_text_color(150, 150, 150)
-        pdf.cell(0, 8, f"cPacleanS v2.0.0 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", align="C")
+        pdf.cell(0, 8, f"cPacleanS v{APP_VERSION} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", align="C")
 
         pdf.output(str(pdf_path))
         return str(pdf_path)
