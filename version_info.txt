@@ -1,0 +1,37 @@
+# Metadata de version para el ejecutable Windows (cPacleanS.exe)
+# Este archivo es leido por PyInstaller para embeber VersionInfo en el PE
+# Los antivirus usan estos datos para evaluar la legitimidad del ejecutable.
+# UTF-8 encoding required.
+
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(2, 2, 0, 0),
+    prodvers=(2, 2, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        u'040904B0',
+        [
+          StringStruct(u'CompanyName',      u'Sota Studio Web'),
+          StringStruct(u'FileDescription',  u'cPacleanS - Malware Cleaner for cPanel Backups'),
+          StringStruct(u'FileVersion',      u'2.2.0.0'),
+          StringStruct(u'InternalName',     u'cPacleanS'),
+          StringStruct(u'LegalCopyright',   u'Copyright (c) 2024-2026 Sota Studio Web'),
+          StringStruct(u'LegalTrademarks',  u'cPacleanS is a trademark of Sota Studio Web'),
+          StringStruct(u'OriginalFilename', u'cPacleanS.exe'),
+          StringStruct(u'ProductName',      u'cPacleanS Malware Cleaner'),
+          StringStruct(u'ProductVersion',   u'2.2.0.0'),
+          StringStruct(u'Comments',         u'Security tool for cPanel backup malware detection and cleanup. Source: https://github.com/sotadev-agency/cPaCleanS'),
+        ]
+      )
+    ]),
+    VarFileInfo([VarStruct(u'Translation', [0x0409, 1200])])
+  ]
+)

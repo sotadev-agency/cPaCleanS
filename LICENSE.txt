@@ -1,17 +1,144 @@
-MalwareCleanup Pro - Licencia de Uso
+================================================================================
+  cPacleanS — Contrato de Licencia de Usuario Final (CLUF / EULA)
+  Version 2.2.0
+================================================================================
 
-Copyright (c) 2026 MalwareCleanup
+Copyright (c) 2024-2026 Sota Studio Web
+Sitio web: https://sotastudioweb.com
+Contacto:  agencia@sotastudioweb.com
+GitHub:    https://github.com/sotadev-agency/cPaCleanS
 
-Se concede permiso, de forma gratuita, para usar, copiar, modificar y distribuir
-este software con fines de seguridad informática y limpieza de malware.
+--------------------------------------------------------------------------------
+PRODUCTO: cPacleanS Malware Cleaner
+EDITOR:   Sota Studio Web (sotadev-agency)
+USO:      Herramienta de seguridad informatica para administradores de servidores
+SISTEMA:  Windows 10 / 11 (64-bit)
+--------------------------------------------------------------------------------
 
-Este software se proporciona "tal cual", sin garantía de ningún tipo, expresa o
-implícita. En ningún caso los autores serán responsables de cualquier daño
-derivado del uso de este software.
+DESCRIPCION DEL SOFTWARE
+------------------------
+cPacleanS es una herramienta de seguridad informatica disenada para detectar,
+analizar y eliminar malware en copias de seguridad (backups) generadas por el
+panel de control cPanel. Permite a administradores de servidores web inspeccionar
+y sanear backups de WordPress, Joomla, Moodle y Laravel antes de restaurarlos a
+un entorno de hosting limpio.
 
-El usuario es responsable de mantener copias de seguridad antes de ejecutar
-cualquier proceso de limpieza automática.
+Funcionalidades principales:
+  - Escaneo de malware en PHP, HTML, JavaScript, bases de datos SQL y correos
+  - Restauracion de archivos core de CMS desde repositorios oficiales
+  - Cuarentena segura con copia de originales antes de cualquier modificacion
+  - Generacion de reportes HTML y PDF para documentacion de incidentes
+  - Integracion opcional con VirusTotal API para verificacion adicional
 
-USO AUTORIZADO: Este software está diseñado exclusivamente para la limpieza
-de malware en copias de seguridad propias. No debe utilizarse para acceder
-a sistemas o datos sin autorización.
+ESTE SOFTWARE ES UNA HERRAMIENTA DE SEGURIDAD LEGITIMA. Su unico proposito
+es ayudar a los administradores a recuperar sitios web comprometidos de forma
+segura y auditable.
+
+--------------------------------------------------------------------------------
+TERMINOS Y CONDICIONES DE USO
+--------------------------------------------------------------------------------
+
+1. CONCESION DE LICENCIA
+   Sota Studio Web concede al usuario una licencia personal, intransferible y
+   no exclusiva para instalar y utilizar cPacleanS en equipos bajo su control
+   directo o de su organizacion, exclusivamente para propositos de seguridad
+   informatica legitimos.
+
+2. USO AUTORIZADO
+   Este software esta disenado y debe utilizarse UNICAMENTE para:
+   a) Analizar copias de seguridad propias o de clientes con autorizacion
+      expresa del propietario del sitio web.
+   b) Detectar y eliminar malware en entornos de hosting bajo administracion
+      directa del usuario.
+   c) Generar reportes de auditoria de seguridad para documentacion interna
+      o para clientes con su consentimiento.
+
+3. USO NO AUTORIZADO
+   Queda expresamente prohibido:
+   a) Utilizar este software para acceder a sistemas o datos sin autorizacion
+      expresa y por escrito del propietario.
+   b) Modificar, descompilar o realizar ingenieria inversa del ejecutable.
+   c) Redistribuir, sublicenciar o vender el software sin permiso escrito de
+      Sota Studio Web.
+   d) Utilizarlo como herramienta de ataque, vigilancia no consentida o
+      cualquier actividad ilegal.
+
+4. DECLARACION DE SEGURIDAD
+   cPacleanS NO contiene codigo malicioso, spyware, adware ni ninguna forma de
+   software no deseado. El ejecutable puede ser sometido a analisis por cualquier
+   proveedor de seguridad para verificar su legitimidad. Si su solucion de
+   seguridad genera una deteccion falsa, rogamos reportarla como False Positive en:
+
+   Microsoft:   https://www.microsoft.com/en-us/wdsi/filesubmission
+   VirusTotal:  https://www.virustotal.com/gui/file-analysis
+
+   El codigo fuente completo esta disponible en:
+   https://github.com/sotadev-agency/cPaCleanS
+
+5. PRIVACIDAD Y DATOS
+   cPacleanS NO recopila, transmite ni almacena datos personales del usuario
+   ni del contenido analizado, salvo cuando el usuario configura explicitamente
+   la integracion con la API de VirusTotal (servicio externo de terceros).
+   Los reportes generados se almacenan exclusivamente de forma local en el equipo
+   del usuario.
+
+6. ACTUALIZACIONES Y SOPORTE
+   Sota Studio Web puede publicar actualizaciones del software a su discrecion.
+   El soporte se presta a traves del repositorio oficial en GitHub:
+   https://github.com/sotadev-agency/cPaCleanS/issues
+
+7. LIMITACION DE RESPONSABILIDAD
+   Este software se proporciona "TAL CUAL" (AS IS), sin garantia de ninguna
+   clase, expresa o implicita, incluyendo pero no limitado a las garantias
+   implicitas de comerciabilidad o idoneidad para un proposito particular.
+
+   EN NINGUN CASO Sota Studio Web sera responsable de danos directos, indirectos,
+   incidentales, especiales, ejemplares o consecuentes que resulten del uso o la
+   imposibilidad de uso de este software.
+
+   EL USUARIO ES RESPONSABLE DE:
+   a) Mantener copias de seguridad antes de ejecutar cualquier proceso de limpieza.
+   b) Verificar los resultados antes de restaurar archivos al hosting.
+   c) Obtener autorizacion del propietario del sitio antes de procesar sus datos.
+
+8. TERMINACION
+   Esta licencia es vigente hasta que sea rescindida. Se rescindira automaticamente
+   si el usuario incumple cualquiera de los terminos aqui establecidos. Al terminar
+   la licencia, el usuario debe destruir todas las copias del software en su posesion.
+
+9. LEY APLICABLE
+   Este acuerdo se rige por las leyes aplicables en la jurisdiccion del editor.
+   Cualquier disputa se sometera a la jurisdiccion competente correspondiente.
+
+--------------------------------------------------------------------------------
+RECONOCIMIENTOS Y COMPONENTES DE TERCEROS
+--------------------------------------------------------------------------------
+
+Este software incorpora los siguientes componentes de codigo abierto:
+
+  - Python 3.11+          (PSF License)         https://python.org
+  - CustomTkinter         (MIT License)          https://github.com/TomSchimansky/CustomTkinter
+  - Jinja2                (BSD License)          https://jinja.palletsprojects.com
+  - fpdf2                 (LGPL-3.0)             https://py-fpdf2.readthedocs.io
+  - requests              (Apache-2.0)           https://requests.readthedocs.io
+  - chardet               (LGPL)                 https://github.com/chardet/chardet
+  - YARA (opcional)       (BSD 3-Clause)         https://virustotal.github.io/yara
+
+Las licencias completas de cada componente se encuentran disponibles en los
+repositorios de sus respectivos proyectos.
+
+--------------------------------------------------------------------------------
+INFORMACION DE CONTACTO Y REPORTE DE VULNERABILIDADES
+--------------------------------------------------------------------------------
+
+Para reportar vulnerabilidades de seguridad, falsos positivos de antivirus o
+problemas de uso, contactar a:
+
+  Email:   agencia@sotastudioweb.com
+  GitHub:  https://github.com/sotadev-agency/cPaCleanS/issues
+  Web:     https://sotastudioweb.com
+
+--------------------------------------------------------------------------------
+Sota Studio Web — cPacleanS v2.2.0
+Copyright (c) 2024-2026 — Todos los derechos reservados
+================================================================================

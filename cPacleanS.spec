@@ -1,9 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
+# cPacleanS v2.2.0 — PyInstaller spec con VersionInfo para Windows
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('src/signatures', 'src/signatures')]
 binaries = []
-hiddenimports = ['customtkinter', 'jinja2', 'requests', 'chardet', 'fpdf', 'multiprocessing']
+hiddenimports = [
+    'customtkinter', 'jinja2', 'requests', 'chardet',
+    'fpdf', 'multiprocessing', 'psutil', 'PIL',
+]
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
@@ -43,4 +47,6 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['assets\\icon.ico'],
+    # VersionInfo embebida en el PE — mejora reconocimiento por antivirus
+    version='version_info.txt',
 )
