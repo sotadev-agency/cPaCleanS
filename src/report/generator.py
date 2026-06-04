@@ -82,6 +82,11 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
         .log-warn { color: #ffbb33; }
         .log-err { color: #ff4444; }
         .log-info { color: #33b5e5; }
+        .db-row-deleted { color: #ff4444; font-size: 11px; }
+        .db-suspicious { color: #ffbb33; font-size: 11px; }
+        .db-protected { color: #33b5e5; font-size: 11px; }
+        .reinstalled { color: #00C851; font-weight: 600; }
+        .not-in-repo { color: #ffbb33; }
         .footer { text-align: center; color: #555; font-size: 11px; padding: 18px; }
         @media print { body { background: #fff; color: #222; } .box, .header, .card { background: #f8f8f8; border-color: #ddd; } }
     </style>
@@ -124,6 +129,11 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     <div class="box">
         <h2>CMS Detectados</h2>
         {% for cms in result.cms_detected %}<span class="tag">{{ cms|upper }}</span>{% endfor %}
+        {% if result.db_prefixes %}
+        <p style="color:#8892b0; font-size:11px; margin-top:8px;">
+            Prefijos: {% for cms, prefix in result.db_prefixes.items() %}{{ cms|upper }}={{ prefix }} {% endfor %}
+        </p>
+        {% endif %}
     </div>
     {% endif %}
 
@@ -136,6 +146,38 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     </div>
     {% endif %}
 
+    {% if result.db_interventions_log %}
+    <div class="box" style="border-color:#4a0f0f;">
+        <h2 style="color:#ff6666;">Intervenciones en Base de Datos ({{ result.db_interventions_log|length }})</h2>
+        <p style="color:#8892b0; font-size:11px; margin-bottom:10px;">
+            Solo se eliminan filas con malware CRITICO CONFIRMADO en tablas protegidas.
+            Las filas sospechosas se marcan para revision manual.
+        </p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Archivo</th><th>Tabla</th><th>CMS</th><th>Tipo</th><th>Detalle</th><th>Accion</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for e in result.db_interventions_log %}
+            <tr>
+                <td style="font-size:11px;">{{ e.file }}</td>
+                <td style="font-weight:600;">{{ e.table }}</td>
+                <td>{% if e.cms %}<span class="tag">{{ e.cms|upper }}</span>{% else %}-{% endif %}</td>
+                <td>{% if e.type == 'row_deleted' %}<span class="db-row-deleted">FILA ELIMINADA</span>
+                    {% elif e.type == 'removed_line' %}<span class="db-row-deleted">LINEA ELIMINADA</span>
+                    {% elif e.type == 'suspicious' %}<span class="db-suspicious">SOSPECHOSO</span>
+                    {% else %}<span style="color:#aaa;">{{ e.type }}</span>{% endif %}</td>
+                <td class="ctx">{{ e.detail|e }}</td>
+                <td style="font-size:11px;">{{ e.action }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
     {% if result.plugins_temas_log %}
     <div class="box" style="border-color:#0f4a60;">
         <h2 style="color:#33b5e5;">Plugins y Temas Removidos ({{ result.plugins_temas_log|length }})</h2>
@@ -145,7 +187,7 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
         <table>
             <thead>
                 <tr>
-                    <th>CMS</th><th>Tipo</th><th>Nombre</th><th>Version</th><th>Accion</th>
+                    <th>CMS</th><th>Tipo</th><th>Nombre</th><th>Version</th><th>Activo</th><th>Accion</th><th>Reinstalado</th>
                 </tr>
             </thead>
             <tbody>
@@ -155,9 +197,15 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
                 <td>{{ e.type }}</td>
                 <td style="font-weight:600;">{{ e.name }}</td>
                 <td style="color:#8892b0;">{{ e.version }}</td>
+                <td>{% if e.is_active %}<span style="color:#00C851;">SI</span>{% else %}<span style="color:#666;">no</span>{% endif %}</td>
                 <td>{% if e.action == 'cuarentena' %}<span style="color:#33b5e5;">cuarentena</span>
                     {% elif e.action == 'eliminado' %}<span style="color:#ff4444;">eliminado</span>
                     {% else %}<span style="color:#ffbb33;">{{ e.action[:40] }}</span>{% endif %}</td>
+                <td>{% if e.reinstalled and e.reinstalled.status == 'reinstalled' %}<span class="reinstalled">v{{ e.reinstalled.version }}</span>
+                    {% elif e.reinstalled and e.reinstalled.status == 'not_in_repo' %}<span class="not-in-repo">no en repo</span>
+                    {% elif e.reinstalled and e.reinstalled.status == 'manual_required' %}<span class="not-in-repo">manual</span>
+                    {% elif e.is_active %}<span style="color:#666;">pendiente</span>
+                    {% else %}-{% endif %}</td>
             </tr>
             {% endfor %}
             </tbody>
@@ -275,7 +323,7 @@ class ReportGenerator:
         pdf.set_auto_page_break(auto=True, margin=20)
         pdf.add_page()
 
-        # ── Header ──
+        # -- Header --
         pdf.set_fill_color(26, 26, 46)
         pdf.rect(10, 10, 190, 30, "F")
         pdf.set_font("Helvetica", "B", 20)
@@ -288,7 +336,7 @@ class ReportGenerator:
         bname = Path(backup_path).name if backup_path else "N/A"
         pdf.cell(0, 6, self._safe_text(f"{datetime.now().strftime('%Y-%m-%d %H:%M')}  |  {bname}  |  {result.total_files_scanned} archivos  |  {result.scan_duration_seconds}s"))
 
-        # ── Que encontramos (resumen ejecutivo claro) ──
+        # -- Que encontramos --
         pdf.set_xy(10, 48)
         pdf.set_font("Helvetica", "B", 15)
         pdf.set_text_color(0, 0, 0)
@@ -306,8 +354,11 @@ class ReportGenerator:
             f"   {result.total_cleaned} archivos fueron puestos en cuarentena.",
         ]
         if result.cms_detected:
-            lines.append(f"")
+            lines.append("")
             lines.append(f"CMS detectados: {', '.join(c.upper() for c in result.cms_detected)}.")
+            if getattr(result, "db_prefixes", None):
+                prefixes_str = ", ".join(f"{c.upper()}={p}" for c, p in result.db_prefixes.items())
+                lines.append(f"Prefijos BD: {prefixes_str}")
         if result.clean_mode_used:
             modes_es = {"normal": "Normal (solo confirmados)", "intermediate": "Intermedio", "strict": "Estricto (todo)"}
             lines.append(f"Modo de limpieza: {modes_es.get(result.clean_mode_used, result.clean_mode_used)}.")
@@ -320,7 +371,7 @@ class ReportGenerator:
             pdf.cell(0, 6, self._safe_text(line))
             pdf.ln(6)
 
-        # ── Severidad visual ──
+        # -- Severidad --
         pdf.ln(6)
         pdf.set_font("Helvetica", "B", 13)
         pdf.set_text_color(0, 0, 0)
@@ -342,7 +393,7 @@ class ReportGenerator:
                 pdf.cell(0, 7, f"  {count} detecciones")
                 pdf.ln(8)
 
-        # ── CMS Restauracion ──
+        # -- CMS Restauracion --
         if result.cms_restore_log:
             pdf.ln(4)
             pdf.set_font("Helvetica", "B", 13)
@@ -361,7 +412,34 @@ class ReportGenerator:
                 pdf.ln(5)
                 shown_cms += 1
 
-        # ── Plugins y Temas Removidos ──
+        # -- Intervenciones en BD --
+        db_log = getattr(result, "db_interventions_log", None)
+        if db_log:
+            pdf.ln(4)
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.set_text_color(0, 0, 0)
+            pdf.cell(0, 10, f"Intervenciones en Base de Datos ({len(db_log)})")
+            pdf.ln(12)
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(50, 50, 50)
+            pdf.cell(0, 5, "Solo se eliminan filas con malware CRITICO CONFIRMADO.")
+            pdf.ln(6)
+            shown_db = 0
+            for entry in db_log:
+                if shown_db >= 30:
+                    pdf.cell(0, 5, self._safe_text(f"  ... y {len(db_log) - 30} entradas mas"))
+                    pdf.ln(5)
+                    break
+                e_type = entry.get("type", "")
+                marker = "[X]" if "deleted" in e_type or "removed" in e_type else "[?]"
+                table = entry.get("table", "?")
+                action = entry.get("action", "")[:60]
+                detail = entry.get("detail", "")[:80]
+                pdf.cell(0, 5, self._safe_text(f"  {marker} {table} | {action} | {detail}"))
+                pdf.ln(5)
+                shown_db += 1
+
+        # -- Plugins y Temas --
         if getattr(result, "plugins_temas_log", None):
             pdf.ln(4)
             pdf.set_font("Helvetica", "B", 13)
@@ -383,12 +461,22 @@ class ReportGenerator:
                 ver = f" v{entry['version']}" if entry.get("version") != "desconocida" else ""
                 action = entry.get("action", "")
                 action_short = "cuarentena" if action == "cuarentena" else "eliminado" if action == "eliminado" else action[:20]
+                active_mark = "[A]" if entry.get("is_active") else "[-]"
+                ri = entry.get("reinstalled")
+                ri_mark = ""
+                if ri and isinstance(ri, dict):
+                    if ri.get("status") == "reinstalled":
+                        ri_mark = f" -> v{ri.get('version', '?')} (reinstalado)"
+                    elif ri.get("status") == "not_in_repo":
+                        ri_mark = " (no en repo)"
+                    elif ri.get("status") == "manual_required":
+                        ri_mark = " (manual)"
                 pdf.cell(0, 5, self._safe_text(
-                    f"  [{entry['cms'].upper()}] {entry['type']}: {entry['name']}{ver}  ->  {action_short}"))
+                    f"  {active_mark} [{entry['cms'].upper()}] {entry['type']}: {entry['name']}{ver} -> {action_short}{ri_mark}"))
                 pdf.ln(5)
                 shown_pt += 1
 
-        # ── Top hallazgos (max 50) ──
+        # -- Top hallazgos --
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 13)
         pdf.set_text_color(0, 0, 0)
@@ -436,7 +524,7 @@ class ReportGenerator:
             pdf.set_text_color(120, 120, 120)
             pdf.cell(0, 6, f"  ... y {remaining} hallazgos mas. Ver reporte HTML completo para la lista detallada.")
 
-        # ── Que significa / recomendaciones ──
+        # -- Recomendaciones --
         pdf.ln(10)
         pdf.set_font("Helvetica", "B", 13)
         pdf.set_text_color(0, 0, 0)
@@ -461,7 +549,7 @@ class ReportGenerator:
             pdf.cell(0, 6, self._safe_text(r))
             pdf.ln(6)
 
-        # ── Footer ──
+        # -- Footer --
         pdf.set_y(-20)
         pdf.set_font("Helvetica", "I", 7)
         pdf.set_text_color(150, 150, 150)

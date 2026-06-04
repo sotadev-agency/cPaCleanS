@@ -1,11 +1,11 @@
-"""Configuración global de cPacleanS."""
+"""Configuracion global de cPacleanS."""
 import os
 import json
 import multiprocessing
 from pathlib import Path
 
 APP_NAME = "cPacleanS"
-APP_VERSION = "2.2.3"
+APP_VERSION = "2.3.0"
 
 # Directorios de cPanel que WHM necesita para restaurar dominios correctamente.
 # Nunca deben ser cuarentenados aunque contengan patrones sospechosos.
@@ -24,6 +24,36 @@ WP_CORE_ROOT_FILES = frozenset({
     "wp-load.php", "wp-login.php", "wp-mail.php", "wp-settings.php",
     "wp-signup.php", "wp-trackback.php", "xmlrpc.php",
 })
+
+# Tablas protegidas por CMS — NUNCA eliminar la tabla completa.
+# Solo se eliminan FILAS especificas con severidad CRITICA CONFIRMADA.
+CMS_PROTECTED_TABLES = {
+    "wordpress": [
+        "options", "users", "usermeta", "posts", "postmeta",
+        "terms", "term_taxonomy", "term_relationships",
+        "comments", "commentmeta", "links",
+    ],
+    "joomla": [
+        "users", "session", "extensions", "menu", "modules",
+        "content", "categories", "assets",
+    ],
+    "moodle": [
+        "config", "config_plugins", "user", "course",
+        "course_modules", "role", "role_assignments",
+    ],
+    "ojs": [
+        "users", "journals", "publications", "submissions",
+        "plugin_settings",
+    ],
+}
+
+# Marcadores para validar deteccion de CMS (requiere AMBOS: archivo + directorio)
+CMS_DETECTION_MARKERS = {
+    "wordpress": {"file": "wp-config.php", "dir": "wp-includes"},
+    "joomla":    {"file": "configuration.php", "dir": "administrator"},
+    "moodle":    {"file": "config.php", "dir": "lib", "extra_file": "lib/moodlelib.php"},
+    "ojs":       {"file": "config.inc.php", "dir": "lib", "extra_dir": "lib/pkp"},
+}
 
 SCAN_MODE_ONLY = "scan_only"
 CLEAN_MODE_NORMAL = "normal"
@@ -44,7 +74,7 @@ DEFAULT_CONFIG = {
     "scan_extensions": {
         "php": [".php", ".php5", ".php7", ".phtml", ".phar"],
         "web": [".html", ".htm", ".js", ".css", ".svg"],
-        "database": [".sql", ".sql.gz"],
+        "database": [".sql", ".sql.gz", ".sql.bz2"],
         "email": [".eml", ".mbox"],
         "config": [".htaccess", ".ini", ".conf", ".env", ".json", ".xml", ".yml", ".yaml"],
         "script": [".sh", ".bash", ".cgi", ".pl", ".py"],
@@ -55,10 +85,10 @@ DEFAULT_CONFIG = {
         "moodle": ["config.php", "mod", "lib/moodlelib.php"],
         "laravel": ["artisan", "app/Http", ".env"],
         "softaculous": ["softaculous", "ACPLsoft"],
-        "ojs": ["config.TEMPLATE.inc.php"],  # Open Journal Systems
+        "ojs": ["config.TEMPLATE.inc.php"],
     },
     "severity_levels": {
-        "critical": {"color": "#FF0000", "label": "Crítico"},
+        "critical": {"color": "#FF0000", "label": "Critico"},
         "high": {"color": "#FF6600", "label": "Alto"},
         "medium": {"color": "#FFAA00", "label": "Medio"},
         "low": {"color": "#FFDD00", "label": "Bajo"},

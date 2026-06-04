@@ -1,19 +1,19 @@
-# cPacleanS v2.1.0 — Contexto del Proyecto para Claude Code
+# cPacleanS v2.3.0 — Contexto del Proyecto para Claude Code
 
-> **Leer este archivo completo antes de cualquier modificación.**
-> Su propósito es permitir que nuevas sesiones de Claude Code comprendan el proyecto sin dañar archivos core.
+> **Leer este archivo completo antes de cualquier modificacion.**
+> Su proposito es permitir que nuevas sesiones de Claude Code comprendan el proyecto sin dañar archivos core.
 
 ---
 
-## 1. Qué es este proyecto
+## 1. Que es este proyecto
 
-**cPacleanS** es una herramienta de escritorio para Windows que escanea y limpia malware de backups cPanel (.tar.gz, .zip). Está dirigida a administradores de servidores web que necesitan sanear sitios infectados antes de restaurarlos.
+**cPacleanS** es una herramienta de escritorio para Windows que escanea y limpia malware de backups cPanel (.tar.gz, .zip). Esta dirigida a administradores de servidores web que necesitan sanear sitios infectados antes de restaurarlos.
 
-- **Versión actual:** 2.2.2
+- **Version actual:** 2.3.0
 - **Lenguaje:** Python 3.11+
 - **Plataforma:** Windows 10/11 64-bit
 - **Entrada:** Archivo de backup cPanel (`.tar.gz`, `.zip`, `.tar`, `.gz`)
-- **Salida:** Reporte HTML + PDF, archivos en cuarentena, core CMS restaurado
+- **Salida:** Reporte HTML + PDF, archivos en cuarentena, core CMS restaurado, .tar.gz limpio
 - **Repositorio:** https://github.com/sotadev-agency/proyectos-ia.git
 
 ---
@@ -24,25 +24,31 @@
 limpiador_malware/
 ├── main.py                        ← Punto de entrada (lanza la GUI)
 ├── src/
-│   ├── config/settings.py         ← Constantes globales y configuración
+│   ├── config/settings.py         ← Constantes globales, tablas protegidas, marcadores CMS
 │   ├── core/
 │   │   ├── engine.py              ← Motor multiprocessing (CORE — leer antes de tocar)
-│   │   ├── extractor.py           ← Extracción de backups cPanel
-│   │   ├── path_filter.py         ← Filtro whitelist/blacklist modo "Solo contenido crítico"
-│   │   ├── cms_restorer.py        ← Restaura core CMS (WP, Joomla, Moodle, Laravel)
-│   │   └── packager.py            ← Empaqueta backup limpio en .tar.gz
+│   │   ├── extractor.py           ← Extraccion de backups cPanel
+│   │   ├── path_filter.py         ← Filtro whitelist/blacklist modo "Solo contenido critico"
+│   │   ├── cms_restorer.py        ← Restaura core CMS (WP, Joomla, Moodle, OJS, Laravel)
+│   │   ├── cms_plugin_cleaner.py  ← Separa/elimina/reinstala plugins y temas por modo (v2.3.0)
+│   │   └── packager.py            ← Empaqueta backup limpio (.tar.gz completo o parcial cPanel)
 │   ├── scanners/
 │   │   ├── php_scanner.py         ← PHP, JS, .htaccess (principal detector)
 │   │   ├── cms_scanner.py         ← WordPress, Joomla, Moodle, Laravel
-│   │   ├── database_scanner.py    ← Dumps MySQL/SQL
-│   │   ├── email_scanner.py       ← Phishing, reinfección
+│   │   ├── database_scanner.py    ← Dumps MySQL/SQL (.sql, .sql.gz, .sql.bz2)
+│   │   ├── email_scanner.py       ← Phishing, reinfeccion
 │   │   └── yara_scanner.py        ← Reglas YARA avanzadas (opcional)
+│   ├── cleaners/
+│   │   └── db_cleaner.py          ← Limpieza BD por fila con tablas protegidas (v2.3.0)
+│   ├── utils/
+│   │   ├── php_serializer.py      ← Parser serializacion PHP para BD (v2.3.0)
+│   │   └── db_utils.py            ← Deteccion prefijos, lectura streaming SQL (v2.3.0)
 │   ├── api/virustotal.py          ← VirusTotal API v3
 │   ├── report/generator.py        ← Reportes HTML (Jinja2) y PDF (fpdf2)
-│   ├── gui/app.py                 ← Interfaz gráfica CustomTkinter
+│   ├── gui/app.py                 ← Interfaz grafica CustomTkinter
 │   └── signatures/malware_rules.yar ← Reglas YARA
 ├── installer/setup.iss            ← Script Inno Setup para instalador
-├── build.py                       ← Script de compilación PyInstaller
+├── build.py                       ← Script de compilacion PyInstaller
 ├── requirements.txt               ← Dependencias Python
 └── reportes/                      ← Reportes generados (no incluir en commits)
 ```
@@ -51,145 +57,109 @@ limpiador_malware/
 
 ## 3. Archivos CORE — no modificar sin entender su contrato
 
-Estos archivos tienen contratos internos que otros módulos dependen. Un cambio incorrecto rompe toda la cadena:
-
 ### `src/config/settings.py`
 Define las constantes que usa todo el sistema:
 ```python
-APP_VERSION = "2.1.0"           # Actualizar solo al subir versión
+APP_VERSION = "2.3.0"
 SCAN_MODE_ONLY = "scan_only"
 CLEAN_MODE_NORMAL = "normal"
 CLEAN_MODE_INTERMEDIATE = "intermediate"
 CLEAN_MODE_STRICT = "strict"
-
-CONFIRMED_MALWARE_CATEGORIES    # Definido en engine.py — ver sección 4
+CPANEL_PROTECTED_DIRS   # dirs cPanel nunca cuarentenados (etc, userdata, dns, cp)
+WP_CORE_ROOT_FILES      # archivos raiz del core de WordPress
+CMS_PROTECTED_TABLES    # tablas BD por CMS que nunca se eliminan completas (v2.3.0)
+CMS_DETECTION_MARKERS   # marcadores file+dir para deteccion robusta de CMS (v2.3.0)
 ```
-Configuración de usuario en: `%APPDATA%\cPacleanS\config.json`
+Configuracion de usuario en: `%APPDATA%\cPacleanS\config.json`
+
+---
 
 ### `src/core/engine.py`
-**Motor multiprocessing — el archivo más crítico.**
+**Motor multiprocessing — el archivo mas critico.**
 
 Contiene:
 - `Finding` (dataclass): un hallazgo individual de malware
 - `ScanResult` (dataclass): resultado agregado de todo el escaneo
 - `ScanEngine`: orquestador del pool de procesos
-- `CONFIRMED_MALWARE_CATEGORIES`: categorías que se auto-limpian en modo Normal
+- `CONFIRMED_MALWARE_CATEGORIES`: categorias que se auto-limpian en modo Normal
 
-**Patrón de multiprocessing que NO se debe cambiar:**
-```python
-# Cada worker inicializa sus propios scanners UNA sola vez
-_worker_scanners = None
-def _worker_init(scanner_classes): ...
-def _worker_scan_batch(file_batch): ...  # llama scanner.scan(path) en cada uno
-```
-Los scanners deben ser serializables (sin locks, sin handles externos en `__init__`).
-
-**Contrato de `Finding`:**
+**Contrato de `ScanResult`:**
 ```python
 @dataclass
-class Finding:
-    file_path: str          # Ruta absoluta al archivo
-    line_number: int = 0
-    severity: str = "medium"  # critical | high | medium | low | info
-    category: str = ""        # Ver CONFIRMED_MALWARE_CATEGORIES
-    description: str = ""
-    matched_pattern: str = ""
-    context: str = ""
-    cleaned: bool = False
-    sha256: str = ""
-    confirmed_malware: bool = False   # True = se limpia automáticamente
+class ScanResult:
+    total_files_scanned: int
+    total_threats_found: int
+    total_cleaned: int
+    scan_duration_seconds: float
+    findings: list[Finding]
+    summary_by_severity: dict
+    summary_by_category: dict
+    cms_detected: list
+    virustotal_hits: list
+    scan_errors: list
+    quarantine_dir: str
+    cms_restore_log: list       # [{type, cms, message}] de CMSRestorer
+    clean_mode_used: str
+    workers_used: int
+    critical_only_mode: bool    # v2.2.0
+    omitted_paths_count: int    # v2.2.0
+    plugins_temas_log: list     # v2.2.3 — [{cms, type, name, version, original_path, action, is_active, reinstalled}]
+    db_interventions_log: list  # v2.3.0 — [{file, table, prefix, cms, type, detail, action}]
+    db_prefixes: dict           # v2.3.0 — {cms: prefix} detectados dinamicamente
 ```
-
-**Modos de limpieza:**
-| Modo | Qué limpia |
-|------|-----------|
-| `scan_only` | Nada. Solo genera reporte. |
-| `normal` | Solo `confirmed_malware=True` |
-| `intermediate` | Confirmados + severidad high/critical |
-| `strict` | Todo lo sospechoso |
-
-**Cuarentena:** Siempre copia el original antes de mover. Estructura:
-```
-cuarentena_YYYYMMDD_HHMMSS/
-  originales_intactos/      ← copia exacta del archivo original
-  amenazas_removidas/       ← archivos movidos desde el backup
-  archivos_0kb/             ← archivos vacíos (restos de infección)
-```
-
-### `src/gui/app.py`
-La GUI importa y orquesta todo el flujo. No tiene lógica de negocio propia.
-
-**Flujo de 6 fases en hilo separado (`_run_scan_thread`):**
-1. Extracción del backup → `BackupExtractor`
-2. Escaneo multiprocessing → `ScanEngine`
-3. Verificación VirusTotal → `VirusTotalClient` (opcional, si hay API key)
-4. Restauración CMS → `CMSRestorer` (si checkbox activo)
-5. Limpieza/cuarentena → `ScanEngine.clean_findings()`
-6. Generación de reportes → `ReportGenerator`
-
-**Control de UI durante escaneo:**
-- `_lock_ui()` / `_unlock_ui()`: deshabilita/habilita controles
-- `_append_log(msg)`: añade línea al log visual (thread-safe)
-- `_update_progress(pct)`: actualiza barra de progreso 0-100
 
 ---
 
-## 4. Contrato de los Scanners
+### `src/core/cms_plugin_cleaner.py` ← reescrito en v2.3.0
+**Flujo correcto para TODOS los modos:**
 
-Todos los scanners en `src/scanners/` siguen la misma interfaz:
-```python
-class XyzScanner:
-    def scan(self, file_path: str) -> list[dict]:
-        """
-        Analiza un archivo. Devuelve lista de dicts con este esquema:
-        {
-            "file_path": str,
-            "line_number": int,
-            "severity": "critical" | "high" | "medium" | "low" | "info",
-            "category": str,        # debe estar en CONFIRMED_MALWARE_CATEGORIES si es auto-limpiable
-            "description": str,
-            "matched_pattern": str,
-            "context": str,         # fragmento de código para el reporte
-            "confirmed_malware": bool,
-        }
-        Devuelve [] si el archivo es limpio o no aplica.
-        """
-```
+1. Leer BD del CMS → detectar prefijo real → identificar plugins/temas ACTIVOS
+2. Mover TODOS los plugins/temas a cuarentena (Normal/Intermedio) o eliminar (Estricto)
+3. Descargar desde repo oficial SOLO los que estan activos segun BD (WordPress.org API)
+4. Instalar version limpia en la copia de trabajo
 
-**Para agregar un nuevo scanner:**
-1. Crear `src/scanners/nuevo_scanner.py` con la clase siguiendo el contrato
-2. Importarlo en `src/gui/app.py` y añadirlo a `SCANNER_CLASSES`
-3. No tocar `engine.py` — el pool lo usa automáticamente
+`CMSPluginCleaner(extract_dir, quarantine_dir, clean_mode, progress_callback, db_paths)`
 
-**`CONFIRMED_MALWARE_CATEGORIES`** — Categorías que activan limpieza en modo Normal:
-```python
-{
-    "webshell", "backdoor", "cryptominer", "dropper",
-    "cms_upload_php", "cms_htaccess_override", "cms_index_hijack",
-    "cms_ini_injection", "double_extension",
-    "malicious_attachment",
-    "htaccess_redirect", "htaccess_handler", "htaccess_php",
-}
-```
-Para agregar una categoría nueva como "auto-limpiable", añadirla a este set en `engine.py`.
+- `.process(cms_detected: list) -> dict` — punto de entrada
+- `.removal_log` — lista de dicts con `{cms, type, name, version, original_path, action, is_active, reinstalled}`
+- `.get_detected_prefixes() -> dict` — prefijos detectados por CMS
+
+**Reinstalacion automatica:**
+- WordPress: API wordpress.org (plugins + temas) — completa
+- Joomla/Moodle/OJS: no hay API equivalente — genera nota de reinstalacion manual
 
 ---
 
-## 5. CMS soportados
+### `src/cleaners/db_cleaner.py` ← nuevo en v2.3.0
+**Limpia dumps SQL eliminando filas maliciosas con proteccion de tablas.**
 
-| CMS | Detección | Restauración core | Restauración plugins |
-|-----|-----------|-------------------|----------------------|
-| WordPress | Completa | Desde wordpress.org | Solo plugins **activos** (leídos del dump SQL) |
-| Joomla | Completa | Desde downloads.joomla.org (dirs core: libraries, includes, layouts, language) | No implementada |
-| Moodle | Completa | Desde download.moodle.org (dirs core: lib, mod, admin, auth…) | No implementada |
-| Laravel | Detección básica | No aplica (app custom) — avisa composer install manual | N/A |
-| Softaculous | Detección | No implementada | No implementada |
+`DBCleaner(extract_dir, cms_detected, prefixes, clean_mode, progress_callback)`
 
-**La restauración de WordPress** lee `active_plugins` y `template` del dump SQL antes de descargar nada. No restaura plugins inactivos ni temas desactivados.
+- `.process(sql_files: list) -> list` — retorna lista de intervenciones
+- `.interventions` — log de todas las acciones realizadas
+
+**Reglas de proteccion:**
+- Tablas protegidas (CMS_PROTECTED_TABLES): solo DELETE de filas con malware CRITICO CONFIRMADO
+- Tablas de codigo propio (sin CMS): misma proteccion que tablas protegidas
+- Tablas no protegidas: reglas normales segun modo de limpieza
+- Filas sospechosas (no criticas): marcadas para revision manual, sin modificar
 
 ---
 
-## 6. Flujo de datos completo
+### `src/utils/php_serializer.py` ← nuevo en v2.3.0
+Parser de serializacion PHP para extraer datos de campos BD.
+- `unserialize_php(data)` — usa phpserialize (pip) con fallback regex
+- `extract_active_plugins_wp(serialized)` — extrae slugs de active_plugins
+
+### `src/utils/db_utils.py` ← nuevo en v2.3.0
+- `iter_sql_lines(file_path)` — streaming .sql/.sql.gz/.sql.bz2
+- `detect_prefix_from_config(cms, cms_root)` — lee wp-config.php, configuration.php, etc.
+- `detect_prefix_from_dump(sql_path, cms)` — fallback: busca CREATE TABLE en dump
+- `read_active_from_dump(sql_path, cms, prefix)` — extrae plugins/temas activos del dump
+
+---
+
+## 4. Flujo de datos completo
 
 ```
 backup.tar.gz
@@ -197,128 +167,124 @@ backup.tar.gz
     ▼
 BackupExtractor.extract()
     │ → BackupInfo { total_files, cms_detected[], structure{} }
-    │ → Directorio temporal extraído
+    │ → Directorio temporal extraido
+    │ → Deteccion CMS robusta (CMS_DETECTION_MARKERS: file + dir + extras)
     ▼
 ScanEngine.scan_directory()
     │ → ProcessPoolExecutor → N workers → _worker_scan_batch()
-    │ → cada worker: [PHPScanner, DatabaseScanner, EmailScanner, CMSScanner, YaraScanner]
+    │ → Soporta .sql.gz y .sql.bz2 (extensiones compuestas)
     │ → Finding[] clasificados
     ▼
-VirusTotalClient.check_files()      (opcional)
-    │ → VTResult[] para top-10 archivos críticos
+VirusTotalClient.check_files()      (opcional, si API key configurada)
+    │ → VTResult[] para top-10 archivos criticos
     ▼
-CMSRestorer.restore_all()           (opcional, si restore_cms_core=True)
-    │ → Descarga core limpio de WordPress.org
-    │ → Reemplaza wp-admin/, wp-includes/, plugins activos
+CMSRestorer.restore_all()           (opcional, si "Restaurar CMS" activo)
+    │ → Descarga core limpio de WP/Joomla/Moodle/OJS
+    │ → Rebuild completo de dirs core infectados (solo CORE, no plugins)
     ▼
 ScanEngine.clean_findings()
     │ → setup_quarantine() crea estructura de cuarentena
-    │ → mueve/elimina según modo
-    │ → separate_premium_suspicious() segrega plugins no verificables
+    │ → mueve/elimina hallazgos segun modo
+    │ → clean_zero_byte_files()
     ▼
-ReportGenerator.generate_html() + generate_pdf()
-    │ → reportes/cpacleans_report_YYYYMMDD_HHMMSS.html
-    │ → reportes/cpacleans_report_YYYYMMDD_HHMMSS.pdf
+[NUEVO v2.3.0] Deteccion de prefijos BD
+    │ → detect_prefix_from_config() o detect_prefix_from_dump()
+    │ → Resultado → ScanResult.db_prefixes
     ▼
-BackupPackager.package()            (opcional, generate_targz=True)
-    → backup_limpio.tar.gz listo para reimportar en cPanel
+[NUEVO v2.3.0] DBCleaner.process()
+    │ → Lee dumps SQL con streaming
+    │ → Tablas protegidas: solo filas criticas confirmadas
+    │ → Tablas propias: misma proteccion
+    │ → Resultado → ScanResult.db_interventions_log
+    ▼
+CMSPluginCleaner.process()
+    │ → Lee BD para detectar activos (via db_utils + php_serializer)
+    │ → Mueve/elimina TODOS los plugins/temas
+    │ → Descarga e instala version limpia de los ACTIVOS (WP.org API)
+    │ → Resultado → ScanResult.plugins_temas_log
+    ▼
+ReportGenerator.generate()
+    │ → HTML con seccion Intervenciones BD + Plugins reinstalados
+    │ → PDF con mismas secciones
+    │ → Solo muestra CMS realmente detectados (fix Moodle fantasma)
+    ▼
+PackagingDialog (opcional, post-limpieza)
+    │ → create_targz() / create_cpanel_partial_targz() / copy_clean_files()
 ```
 
 ---
 
-## 7. Rendimiento y limitaciones conocidas
+## 5. CMS soportados
 
-**Rendimiento real medido:**
-| Backup | Archivos | Tiempo | Workers |
-|--------|----------|--------|---------|
-| 50 MB | 3.075 | ~58 s | 5 |
-| 354 MB | 22.472 | ~35 s | 5 |
-| 1.2 GB | 52.013 | ~15 min | 5 |
-
-**Límites de archivo en scanners:**
-- `php_scanner`: omite archivos > 5 MB y archivos binarios (detecta `\x00`)
-- `database_scanner`: máximo 500 hallazgos por archivo SQL
-- `yara_scanner`: omite archivos > 10 MB, timeout 30 s por archivo
-
-**Limitaciones actuales v2.2.2:**
-- Restauración de plugins/temas solo funciona para **WordPress** (Joomla y Moodle restauran core pero no extensiones)
-- Restauración de **Laravel**: no aplica (aplicación custom) — la herramienta detecta la versión y advierte ejecutar `composer install` manualmente
-- Lista de plugins maliciosos: 48 entradas en `cms_scanner.py` — puede ampliarse añadiendo a `KNOWN_MALICIOUS_PLUGINS`
+| CMS | Deteccion | Restauracion core | Plugins/temas | Reinstalacion auto |
+|-----|-----------|-------------------|---------------|-------------------|
+| WordPress | Robusta (wp-config.php + wp-includes/) | Desde wordpress.org | Todos a cuarentena, activos reinstalados | Si (WP.org API) |
+| Joomla | Robusta (configuration.php + administrator/) | Dirs core desde joomla.org | Todos a cuarentena | No (nota manual) |
+| Moodle | Robusta (config.php + lib/moodlelib.php) | Dirs core desde moodle.org | Todos a cuarentena | No (nota manual) |
+| OJS | Robusta (config.inc.php + lib/pkp/) | Dirs core desde GitHub | Todos a cuarentena | No (nota manual) |
+| Laravel | Deteccion basica | No aplica — avisa `composer install` | N/A | N/A |
 
 ---
 
-## 8. Dependencias clave
+## 6. Dependencias clave
 
 ```
-customtkinter>=5.2.0    # GUI dark mode — no reemplazar por tkinter estándar
-yara-python>=4.3.0      # Opcional — si no está instalado, YaraScanner devuelve []
-requests>=2.31.0        # APIs (VirusTotal, WordPress.org)
+customtkinter>=5.2.0    # GUI dark mode
+yara-python>=4.3.0      # Opcional — si no esta instalado, YaraScanner devuelve []
+requests>=2.31.0        # APIs (VirusTotal, WordPress.org, Joomla, Moodle, OJS)
 jinja2>=3.1.2           # Templates HTML para reportes
-fpdf2>=2.8.0            # Generación PDF
-chardet>=5.2.0          # Detección de encoding de archivos
-python-magic-bin>=0.4.14 # Detección de tipo MIME (Windows)
+fpdf2>=2.8.0            # Generacion PDF
+chardet>=5.2.0          # Deteccion de encoding de archivos
+python-magic-bin>=0.4.14 # Deteccion de tipo MIME (Windows)
 psutil>=5.9.0           # Info de sistema (CPUs disponibles)
+phpserialize>=1.3       # Parser serializacion PHP para BD (v2.3.0)
 pyinstaller>=6.0.0      # Solo para compilar el ejecutable
 ```
 
 ---
 
-## 9. Cómo compilar y distribuir
+## 7. Historial de versiones resumido
 
-```bash
-# Instalar dependencias
-pip install -r requirements.txt
-
-# Ejecutar en desarrollo
-python main.py
-
-# Compilar ejecutable (.exe)
-python build.py
-# o directamente:
-pyinstaller cPacleanS.spec
-
-# El instalador se genera con Inno Setup usando installer/setup.iss
-```
-
----
-
-## 10. Reglas de seguridad del código
-
-- La cuarentena SIEMPRE guarda copia original antes de mover o eliminar
-- El modo `scan_only` nunca toca archivos bajo ninguna circunstancia
-- `confirmed_malware=True` solo se asigna cuando la categoría está en `CONFIRMED_MALWARE_CATEGORIES` AND la severidad es high/critical, O cuando hay múltiples patrones (≥3 hits, injection + obfuscation)
-- No se eliminan archivos de plugins/temas premium (se segregan a carpeta separada para revisión manual)
-- Los archivos de logs de cuarentena (`quarantine_log.json`) se preservan siempre
-
----
-
-## 11. Convenciones del código
-
-- Docstrings cortos en una línea por módulo/clase, sin bloques extensos
-- Logging visual vía callbacks (`progress_callback`, `log_callback`) — no `print()` en módulos core
-- Los errores de archivos individuales se capturan y se añaden a `scan_errors[]`, sin detener el escaneo
-- Rutas Windows largas (>260 chars): usar prefijo `\\?\` en `extractor.py`
-- Encoding de archivos: intentar UTF-8, fallback a latin-1, fallback a ignore
-
----
-
-## 12. Historial de versiones resumido
-
-| Versión | Cambios principales |
+| Version | Cambios principales |
 |---------|---------------------|
-| 2.0.0 | Migración a multiprocessing, cuarentena segura, reportes PDF |
-| 2.0.1 | Log visual por fases, escaneo de reinfección, modo VT deep, bloqueo de controles UI |
-| 2.1.0 | Fix truncate filenames, limpieza archivos 0KB, separación plugins premium/sospechosos, rutas relativas en reporte |
-| 2.2.0 | Modo "Solo contenido crítico" (whitelist/blacklist rutas cPanel), restauración Joomla/Moodle/Laravel, 48 plugins maliciosos, botón validar API key VT |
-| 2.2.1 | Fix: doble llamada redundante en php_scanner; Fix: API yara-python ≥4.3 (StringMatch); Fix: spec agrega collect_all(fpdf) para PDF en exe, hidden imports multiprocessing |
-| 2.2.2 | Fix crítico: path_filter usaba ruta absoluta — 'Temp' de AppData bloqueaba TODOS los archivos (0 detecciones); cPanel core preservation en clean_findings; Full rebuild CMS (elimina dirs infectados, instala core limpio); OJS soporte; CPANEL_PROTECTED_DIRS en settings |
+| 2.0.0 | Migracion a multiprocessing, cuarentena segura, reportes PDF |
+| 2.0.1 | Log visual por fases, escaneo de reinfeccion, modo VT deep, bloqueo de controles UI |
+| 2.1.0 | Fix truncate filenames, limpieza archivos 0KB, separacion plugins premium/sospechosos, rutas relativas en reporte |
+| 2.2.0 | Modo "Solo contenido critico", restauracion Joomla/Moodle/Laravel, 48 plugins maliciosos, boton validar API key VT |
+| 2.2.1 | Fix: doble llamada redundante en php_scanner; Fix: API yara-python ≥4.3; Fix: spec agrega collect_all(fpdf) |
+| 2.2.2 | Fix critico: path_filter usaba ruta absoluta; cPanel core preservation; Full rebuild CMS; OJS soporte |
+| 2.2.3 | CMSPluginCleaner: separa/elimina plugins/temas; BackupPackager.create_cpanel_partial_targz(); seccion plugins en HTML+PDF |
+| **2.3.0** | **BD: parser SQL robusto (.sql.bz2), prefijos dinamicos, tablas protegidas, limpieza por fila. Plugins: lee activos desde BD, reinstala desde WP.org. Reportes: seccion BD, solo CMS detectados. Fix: Moodle fantasma en deteccion** |
 
 ---
 
-## 13. Próximas mejoras identificadas (backlog)
+## 8. Nuevos archivos v2.3.0
 
-- [ ] Restauración de plugins/extensiones para Joomla (Joomla Extensions Directory API no existe como WP — requiere scraping o lista manual)
-- [ ] Restauración de plugins para Moodle (moodle.org no tiene API de descarga como WP)
-- [ ] Modo "Solo contenido crítico": detección dinámica de nombres de addon domains sin conocerlos de antemano
-- [ ] Panel de configuración de workers (actualmente solo via config.json)
-- [ ] Exportar lista de archivos omitidos por el filtro crítico a CSV
+- `src/utils/__init__.py` — modulo utilidades
+- `src/utils/php_serializer.py` — parser serializacion PHP
+- `src/utils/db_utils.py` — streaming SQL, deteccion prefijos, lectura activos BD
+- `src/cleaners/__init__.py` — modulo limpiadores
+- `src/cleaners/db_cleaner.py` — limpieza BD con tablas protegidas
+
+---
+
+## 9. Reglas de seguridad del codigo
+
+- La cuarentena SIEMPRE guarda copia original antes de mover o eliminar (excepto modo `strict`)
+- El modo `scan_only` nunca toca archivos bajo ninguna circunstancia
+- NUNCA eliminar tablas completas de BD — solo filas con malware CRITICO CONFIRMADO
+- Tablas de codigo propio (sin CMS) tienen misma proteccion que tablas protegidas
+- Los dirs de configuracion cPanel nunca se cuarentenan — ver `CPANEL_PROTECTED_DIRS`
+- Deteccion de CMS requiere file + dir + extras (CMS_DETECTION_MARKERS) para evitar falsos positivos
+- Prefijos de BD se detectan desde config del CMS o como fallback desde el dump SQL
+
+---
+
+## 10. Proximas mejoras identificadas (backlog)
+
+- [ ] Descargar y reinstalar plugins de Joomla (no hay API como WP.org)
+- [ ] Descargar y reinstalar plugins de Moodle (moodle.org sin API directa)
+- [ ] Omitir descarga de plugins en CMSRestorer cuando CMSPluginCleaner va a manejarlos
+- [ ] Modo "Solo contenido critico": deteccion dinamica de addon domains
+- [ ] Exportar lista de archivos omitidos por el filtro critico a CSV
+- [ ] Panel de configuracion de workers en la GUI

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 build/
+build_temp/
 __pycache__/
 *.pyc
 .env

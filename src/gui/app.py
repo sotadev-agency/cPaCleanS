@@ -1,4 +1,4 @@
-"""Interfaz grafica de cPacleanS v2.2 — con log de fases, bloqueo de controles y cancelacion segura."""
+"""Interfaz grafica de cPacleanS v2.3 — con log de fases, bloqueo de controles y cancelacion segura."""
 import os
 import re
 import sys
@@ -26,6 +26,8 @@ from ..report.generator import ReportGenerator
 from ..core.cms_restorer import CMSRestorer
 from ..core.packager import BackupPackager
 from ..core.cms_plugin_cleaner import CMSPluginCleaner
+from ..cleaners.db_cleaner import DBCleaner
+from ..utils.db_utils import detect_prefix_from_config, detect_prefix_from_dump
 
 SCANNER_CLASSES = [PHPScanner, DatabaseScanner, EmailScanner, CMSScanner, YaraScanner]
 
@@ -357,6 +359,46 @@ class CpacleanSApp(ctk.CTk):
                 if zero_count:
                     self._safe_result(f"Archivos 0KB removidos: {zero_count}")
 
+                # Detectar prefijos de BD para CMS
+                db_paths = info.structure.get("databases", [])
+                detected_prefixes = {}
+                if info.cms_detected and db_paths:
+                    from ..core.cms_plugin_cleaner import _CMS_ROOT_MARKERS
+                    for cms_name in info.cms_detected:
+                        if cms_name not in _CMS_ROOT_MARKERS:
+                            continue
+                        for website_root in info.structure.get("websites", []):
+                            prefix = detect_prefix_from_config(cms_name, website_root)
+                            if prefix:
+                                detected_prefixes[cms_name] = prefix
+                                self._safe_detail(f"[{cms_name.upper()}] Prefijo BD: {prefix}")
+                                break
+                        if cms_name not in detected_prefixes:
+                            for dp in db_paths:
+                                prefix = detect_prefix_from_dump(dp, cms_name)
+                                if prefix:
+                                    detected_prefixes[cms_name] = prefix
+                                    self._safe_detail(f"[{cms_name.upper()}] Prefijo BD (dump): {prefix}")
+                                    break
+                    result.db_prefixes = detected_prefixes
+
+                # Limpieza de BD (filas maliciosas, tablas protegidas)
+                if db_paths and info.cms_detected and result.quarantine_dir:
+                    self._safe_status("Limpiando base de datos...")
+                    db_cleaner = DBCleaner(
+                        extract_dir=info.extract_dir,
+                        cms_detected=info.cms_detected,
+                        prefixes=detected_prefixes,
+                        clean_mode=clean_mode,
+                        progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
+                    )
+                    db_interventions = db_cleaner.process(db_paths)
+                    result.db_interventions_log = db_interventions
+                    if db_interventions:
+                        deleted = sum(1 for i in db_interventions if "deleted" in i.get("type", "") or "removed" in i.get("type", ""))
+                        suspicious = sum(1 for i in db_interventions if i.get("type") == "suspicious")
+                        self._safe_result(f"BD: {deleted} filas eliminadas, {suspicious} sospechosas")
+
                 # Separar/eliminar plugins y temas (vector #1 de reinfeccion)
                 if info.cms_detected and result.quarantine_dir:
                     plugin_cleaner = CMSPluginCleaner(
@@ -364,18 +406,28 @@ class CpacleanSApp(ctk.CTk):
                         quarantine_dir=result.quarantine_dir,
                         clean_mode=clean_mode,
                         progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
+                        db_paths=db_paths,
                     )
                     pt_counts = plugin_cleaner.process(info.cms_detected)
                     result.plugins_temas_log = plugin_cleaner.removal_log
+                    if not result.db_prefixes:
+                        result.db_prefixes = plugin_cleaner.get_detected_prefixes()
                     if pt_counts["total"] > 0:
                         action_word = "eliminados" if clean_mode == "strict" else "en cuarentena"
                         self._safe_result(f"Plugins/temas {action_word}: {pt_counts['total']}")
                         for cms, n in pt_counts["by_cms"].items():
                             if n:
                                 self._safe_detail(f"{cms.upper()}: {n} extensiones")
+                        reinstalled = sum(1 for e in plugin_cleaner.removal_log
+                                          if e.get("reinstalled", {}).get("status") == "reinstalled")
+                        not_in_repo = sum(1 for e in plugin_cleaner.removal_log
+                                          if e.get("reinstalled", {}).get("status") == "not_in_repo")
+                        if reinstalled:
+                            self._safe_detail(f"Reinstalados desde repo oficial: {reinstalled}")
+                        if not_in_repo:
+                            self._safe_detail(f"No en repo oficial (reinstalar manual): {not_in_repo}")
                         if clean_mode != "strict":
                             self._safe_detail("Ver REINSTALAR_PLUGINS.txt en cuarentena/plugins_temas/")
-                        self._safe_detail("Reinstalar SOLO desde repositorios oficiales del CMS")
 
                 self._safe_detail(f"Cuarentena: {result.quarantine_dir}")
 

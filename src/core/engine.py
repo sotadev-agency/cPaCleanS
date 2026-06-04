@@ -59,6 +59,10 @@ class ScanResult:
     omitted_paths_count: int = 0
     # v2.2.3 — log de plugins/temas separados
     plugins_temas_log: list = field(default_factory=list)
+    # v2.3.0 — intervenciones en BD (filas eliminadas/sospechosas)
+    db_interventions_log: list = field(default_factory=list)
+    # v2.3.0 — prefijos de tablas detectados por CMS
+    db_prefixes: dict = field(default_factory=dict)
 
 
 # --- Multiprocessing worker con scanners persistentes por proceso ---
@@ -236,14 +240,18 @@ class ScanEngine:
             "config.php", ".user.ini", "php.ini", "index.php",
         }
 
+        compound_extensions = {e for e in all_extensions if e.count(".") > 1}
+
         for root, _, filenames in os.walk(directory):
             for fname in filenames:
                 fp = Path(root) / fname
                 ext = fp.suffix.lower()
                 name_lower = fname.lower()
 
+                has_compound = any(name_lower.endswith(ce) for ce in compound_extensions)
                 should_scan = (
                     ext in all_extensions
+                    or has_compound
                     or name_lower in important_names
                     or name_lower.startswith(".")
                 )

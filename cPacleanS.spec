@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# cPacleanS v2.2.3 — PyInstaller spec con VersionInfo para Windows
+# cPacleanS v2.3.0 — PyInstaller spec con VersionInfo para Windows
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('src/signatures', 'src/signatures')]
@@ -10,7 +10,8 @@ hiddenimports = [
     'multiprocessing', 'multiprocessing.pool', 'multiprocessing.managers',
     'multiprocessing.resource_tracker', 'multiprocessing.popen_spawn_win32',
     'concurrent.futures', 'concurrent.futures.process',
-    'psutil', 'PIL',
+    'psutil', 'PIL', 'phpserialize',
+    'bz2', 'gzip',
 ]
 
 # Incluye customtkinter completo (temas, fuentes, assets)

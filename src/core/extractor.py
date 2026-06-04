@@ -212,14 +212,41 @@ class BackupExtractor:
         return info
 
     def _detect_cms(self, root, files, info, structure):
-        from ..config.settings import DEFAULT_CONFIG
-        cms_patterns = DEFAULT_CONFIG["cms_patterns"]
+        from ..config.settings import CMS_DETECTION_MARKERS
+        root_path = Path(root)
+        dirs_here = set()
+        try:
+            dirs_here = {d.name for d in root_path.iterdir() if d.is_dir()}
+        except (OSError, PermissionError):
+            pass
 
-        for cms_name, markers in cms_patterns.items():
+        for cms_name, markers in CMS_DETECTION_MARKERS.items():
+            if cms_name in info.cms_detected:
+                continue
+            req_file = markers.get("file", "")
+            req_dir = markers.get("dir", "")
+            if req_file not in files:
+                continue
+            if req_dir and req_dir not in dirs_here:
+                continue
+            extra_file = markers.get("extra_file", "")
+            if extra_file and not (root_path / extra_file).exists():
+                continue
+            extra_dir = markers.get("extra_dir", "")
+            if extra_dir and not (root_path / extra_dir).exists():
+                continue
+            info.cms_detected.append(cms_name)
+            if str(root) not in structure["websites"]:
+                structure["websites"].append(str(root))
+
+        from ..config.settings import DEFAULT_CONFIG
+        for cms_name in ("laravel", "softaculous"):
+            if cms_name in info.cms_detected:
+                continue
+            markers = DEFAULT_CONFIG["cms_patterns"].get(cms_name, [])
             for marker in markers:
                 if marker in files:
-                    if cms_name not in info.cms_detected:
-                        info.cms_detected.append(cms_name)
+                    info.cms_detected.append(cms_name)
                     if str(root) not in structure["websites"]:
                         structure["websites"].append(str(root))
                     break
