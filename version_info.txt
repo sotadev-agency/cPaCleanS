@@ -5,8 +5,8 @@
 
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 2, 1, 0),
-    prodvers=(2, 2, 1, 0),
+    filevers=(2, 2, 3, 0),
+    prodvers=(2, 2, 3, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -21,13 +21,13 @@ VSVersionInfo(
         [
           StringStruct(u'CompanyName',      u'Sota Studio Web'),
           StringStruct(u'FileDescription',  u'cPacleanS - Malware Cleaner for cPanel Backups'),
-          StringStruct(u'FileVersion',      u'2.2.1.0'),
+          StringStruct(u'FileVersion',      u'2.2.3.0'),
           StringStruct(u'InternalName',     u'cPacleanS'),
           StringStruct(u'LegalCopyright',   u'Copyright (c) 2024-2026 Sota Studio Web'),
           StringStruct(u'LegalTrademarks',  u'cPacleanS is a trademark of Sota Studio Web'),
           StringStruct(u'OriginalFilename', u'cPacleanS.exe'),
           StringStruct(u'ProductName',      u'cPacleanS Malware Cleaner'),
-          StringStruct(u'ProductVersion',   u'2.2.1.0'),
+          StringStruct(u'ProductVersion',   u'2.2.3.0'),
           StringStruct(u'Comments',         u'Security tool for cPanel backup malware detection and cleanup. Source: https://github.com/sotadev-agency/cPaCleanS'),
         ]
       )

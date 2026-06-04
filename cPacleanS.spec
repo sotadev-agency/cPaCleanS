@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# cPacleanS v2.2.1 — PyInstaller spec con VersionInfo para Windows
+# cPacleanS v2.2.3 — PyInstaller spec con VersionInfo para Windows
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('src/signatures', 'src/signatures')]
