@@ -136,6 +136,35 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     </div>
     {% endif %}
 
+    {% if result.plugins_temas_log %}
+    <div class="box" style="border-color:#0f4a60;">
+        <h2 style="color:#33b5e5;">Plugins y Temas Removidos ({{ result.plugins_temas_log|length }})</h2>
+        <p style="color:#8892b0; font-size:11px; margin-bottom:10px;">
+            Reinstalar SOLO desde repositorios oficiales del CMS — no reutilizar archivos originales.
+        </p>
+        <table>
+            <thead>
+                <tr>
+                    <th>CMS</th><th>Tipo</th><th>Nombre</th><th>Version</th><th>Accion</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for e in result.plugins_temas_log %}
+            <tr>
+                <td><span class="tag">{{ e.cms|upper }}</span></td>
+                <td>{{ e.type }}</td>
+                <td style="font-weight:600;">{{ e.name }}</td>
+                <td style="color:#8892b0;">{{ e.version }}</td>
+                <td>{% if e.action == 'cuarentena' %}<span style="color:#33b5e5;">cuarentena</span>
+                    {% elif e.action == 'eliminado' %}<span style="color:#ff4444;">eliminado</span>
+                    {% else %}<span style="color:#ffbb33;">{{ e.action[:40] }}</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
     <div class="box">
         <h2>Por Categoria</h2>
         {% for cat, count in result.summary_by_category.items()|sort(attribute='1', reverse=True) %}
@@ -331,6 +360,33 @@ class ReportGenerator:
                 pdf.cell(0, 5, self._safe_text(f"  {marker} [{entry['cms'].upper()}] {entry['message'][:100]}"))
                 pdf.ln(5)
                 shown_cms += 1
+
+        # ── Plugins y Temas Removidos ──
+        if getattr(result, "plugins_temas_log", None):
+            pdf.ln(4)
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.set_text_color(0, 0, 0)
+            pdf.cell(0, 10, f"Plugins y Temas Removidos ({len(result.plugins_temas_log)})")
+            pdf.ln(12)
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(50, 50, 50)
+            pdf.cell(0, 5, "Reinstalar SOLO desde repositorios oficiales del CMS.")
+            pdf.ln(6)
+            shown_pt = 0
+            for entry in result.plugins_temas_log:
+                if shown_pt >= 40:
+                    remaining_pt = len(result.plugins_temas_log) - 40
+                    pdf.cell(0, 5, self._safe_text(
+                        f"  ... y {remaining_pt} mas. Ver reporte HTML o REINSTALAR_PLUGINS.txt"))
+                    pdf.ln(5)
+                    break
+                ver = f" v{entry['version']}" if entry.get("version") != "desconocida" else ""
+                action = entry.get("action", "")
+                action_short = "cuarentena" if action == "cuarentena" else "eliminado" if action == "eliminado" else action[:20]
+                pdf.cell(0, 5, self._safe_text(
+                    f"  [{entry['cms'].upper()}] {entry['type']}: {entry['name']}{ver}  ->  {action_short}"))
+                pdf.ln(5)
+                shown_pt += 1
 
         # ── Top hallazgos (max 50) ──
         pdf.add_page()

@@ -25,6 +25,7 @@ from ..api.virustotal import VirusTotalClient
 from ..report.generator import ReportGenerator
 from ..core.cms_restorer import CMSRestorer
 from ..core.packager import BackupPackager
+from ..core.cms_plugin_cleaner import CMSPluginCleaner
 
 SCANNER_CLASSES = [PHPScanner, DatabaseScanner, EmailScanner, CMSScanner, YaraScanner]
 
@@ -356,13 +357,25 @@ class CpacleanSApp(ctk.CTk):
                 if zero_count:
                     self._safe_result(f"Archivos 0KB removidos: {zero_count}")
 
-                # Separar premium y sospechosos
-                cms_log = result.cms_restore_log if result.cms_restore_log else []
-                sep = engine.separate_premium_suspicious(info.extract_dir, cms_log)
-                if sep["premium"] or sep["suspicious"]:
-                    self._safe_result(f"Separados: {sep['premium']} premium, {sep['suspicious']} sospechosos")
-                    self._safe_detail("Premium: solicitar al desarrollador antes de resubir")
-                    self._safe_detail("Sospechosos: NO resubir al hosting")
+                # Separar/eliminar plugins y temas (vector #1 de reinfeccion)
+                if info.cms_detected and result.quarantine_dir:
+                    plugin_cleaner = CMSPluginCleaner(
+                        extract_dir=info.extract_dir,
+                        quarantine_dir=result.quarantine_dir,
+                        clean_mode=clean_mode,
+                        progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
+                    )
+                    pt_counts = plugin_cleaner.process(info.cms_detected)
+                    result.plugins_temas_log = plugin_cleaner.removal_log
+                    if pt_counts["total"] > 0:
+                        action_word = "eliminados" if clean_mode == "strict" else "en cuarentena"
+                        self._safe_result(f"Plugins/temas {action_word}: {pt_counts['total']}")
+                        for cms, n in pt_counts["by_cms"].items():
+                            if n:
+                                self._safe_detail(f"{cms.upper()}: {n} extensiones")
+                        if clean_mode != "strict":
+                            self._safe_detail("Ver REINSTALAR_PLUGINS.txt en cuarentena/plugins_temas/")
+                        self._safe_detail("Reinstalar SOLO desde repositorios oficiales del CMS")
 
                 self._safe_detail(f"Cuarentena: {result.quarantine_dir}")
 
@@ -384,7 +397,9 @@ class CpacleanSApp(ctk.CTk):
 
             # ── FASE 7 ──
             if is_clean:
-                self.after(0, lambda: self._ask_packaging(info.extract_dir, backup_path))
+                _info = info
+                _crit = critical_only
+                self.after(0, lambda: self._ask_packaging(_info, backup_path, _crit))
             else:
                 self._safe_log(f"\n{'='*50}")
                 self._safe_log(f"  ESCANEO COMPLETADO")
@@ -397,8 +412,9 @@ class CpacleanSApp(ctk.CTk):
             self._safe_status(f"Error: {e}")
             self.after(0, self._unlock_ui)
 
-    def _ask_packaging(self, extract_dir, backup_path):
-        PackagingDialog(self, extract_dir, backup_path,
+    def _ask_packaging(self, backup_info, backup_path, critical_only=False):
+        PackagingDialog(self, backup_info.extract_dir, backup_path,
+                        backup_info=backup_info, critical_only=critical_only,
                         log_cb=self._safe_result, detail_cb=self._safe_detail,
                         status_cb=self._safe_status, progress_cb=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
                         finish_cb=self._finish_packaging)
@@ -413,6 +429,18 @@ class CpacleanSApp(ctk.CTk):
             self._safe_result(f"Archivo .tar.gz: {Path(result_path).name} ({size} MB)")
         except Exception as e:
             self._safe_detail(f"Error empaquetando: {e}")
+        self.after(0, self._finish_packaging)
+
+    def _do_package_cpanel_partial(self, extract_dir, backup_info, out_path):
+        try:
+            packager = BackupPackager(
+                progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)))
+            result_path = packager.create_cpanel_partial_targz(extract_dir, backup_info, str(out_path))
+            size = round(Path(result_path).stat().st_size / (1024 * 1024), 1)
+            self._safe_result(f"Backup parcial cPanel: {Path(result_path).name} ({size} MB)")
+            self._safe_detail("Importable en WHM > Backup > Restore a Full Backup")
+        except Exception as e:
+            self._safe_detail(f"Error generando backup parcial: {e}")
         self.after(0, self._finish_packaging)
 
     def _do_copy_files(self, extract_dir, dest):
@@ -489,23 +517,29 @@ class CpacleanSApp(ctk.CTk):
 
 class PackagingDialog(ctk.CTkToplevel):
     """Dialogo para elegir nombre y formato del archivo limpio."""
-    def __init__(self, parent, extract_dir, backup_path, log_cb, detail_cb, status_cb, progress_cb, finish_cb):
+    def __init__(self, parent, extract_dir, backup_path,
+                 log_cb, detail_cb, status_cb, progress_cb, finish_cb,
+                 backup_info=None, critical_only=False):
         super().__init__(parent)
-        self.extract_dir = extract_dir
-        self.backup_path = backup_path
-        self.log_cb = log_cb
-        self.detail_cb = detail_cb
-        self.status_cb = status_cb
-        self.progress_cb = progress_cb
-        self.finish_cb = finish_cb
-        self.parent_app = parent
+        self.extract_dir  = extract_dir
+        self.backup_path  = backup_path
+        self.backup_info  = backup_info
+        self.critical_only = critical_only
+        self.log_cb       = log_cb
+        self.detail_cb    = detail_cb
+        self.status_cb    = status_cb
+        self.progress_cb  = progress_cb
+        self.finish_cb    = finish_cb
+        self.parent_app   = parent
 
         self.title("Empaquetar resultado")
-        self.geometry("550x280")
+        height = 340 if critical_only else 280
+        self.geometry(f"580x{height}")
         self.transient(parent)
         self.grab_set()
 
-        default_name = re.sub(r'\.(tar\.gz|tgz|tar|zip|gz)$', '', Path(backup_path).name, flags=re.IGNORECASE) + "-limpio"
+        default_name = re.sub(r'\.(tar\.gz|tgz|tar|zip|gz)$', '',
+                               Path(backup_path).name, flags=re.IGNORECASE) + "-limpio"
 
         frame = ctk.CTkFrame(self, fg_color="#1a1a2e", corner_radius=10)
         frame.pack(fill="both", expand=True, padx=12, pady=12)
@@ -515,7 +549,7 @@ class PackagingDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(frame, text="Nombre del archivo de salida:", anchor="w",
                      font=ctk.CTkFont(size=11)).pack(padx=16, anchor="w")
-        self.name_entry = ctk.CTkEntry(frame, width=420, placeholder_text=default_name)
+        self.name_entry = ctk.CTkEntry(frame, width=440, placeholder_text=default_name)
         self.name_entry.pack(padx=16, pady=(0, 8))
         self.name_entry.insert(0, default_name)
 
@@ -523,17 +557,38 @@ class PackagingDialog(ctk.CTkToplevel):
                      font=ctk.CTkFont(size=11)).pack(padx=16, anchor="w", pady=(4, 0))
 
         btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        btn_frame.pack(pady=12)
+        btn_frame.pack(pady=8)
 
-        ctk.CTkButton(btn_frame, text="Generar .tar.gz\n(para cPanel)", width=160, height=50,
+        ctk.CTkButton(btn_frame, text="Generar .tar.gz\n(completo, para cPanel)", width=170, height=50,
                       command=self._do_targz, fg_color="#00a86b", hover_color="#00c878",
-                      font=ctk.CTkFont(size=12)).pack(side="left", padx=8)
-        ctk.CTkButton(btn_frame, text="Copiar a carpeta", width=140, height=50,
+                      font=ctk.CTkFont(size=12)).pack(side="left", padx=6)
+        ctk.CTkButton(btn_frame, text="Copiar a carpeta", width=130, height=50,
                       command=self._do_copy, fg_color="#0f3460", hover_color="#1a4f8a",
-                      font=ctk.CTkFont(size=12)).pack(side="left", padx=8)
-        ctk.CTkButton(btn_frame, text="Solo reportes", width=120, height=50,
+                      font=ctk.CTkFont(size=12)).pack(side="left", padx=6)
+        ctk.CTkButton(btn_frame, text="Solo reportes", width=110, height=50,
                       command=self._do_skip, fg_color="#555", hover_color="#777",
-                      font=ctk.CTkFont(size=12)).pack(side="left", padx=8)
+                      font=ctk.CTkFont(size=12)).pack(side="left", padx=6)
+
+        if critical_only:
+            ctk.CTkLabel(frame,
+                text="Modo Solo Contenido Critico activo:",
+                anchor="w", font=ctk.CTkFont(size=11), text_color="#33b5e5",
+            ).pack(padx=16, anchor="w", pady=(10, 2))
+            btn_frame2 = ctk.CTkFrame(frame, fg_color="transparent")
+            btn_frame2.pack(pady=4)
+            ctk.CTkButton(
+                btn_frame2,
+                text="Backup parcial cPanel\n(SQL + homedir + mail)",
+                width=200, height=50,
+                command=self._do_cpanel_partial,
+                fg_color="#1a4f8a", hover_color="#1e5fa0",
+                font=ctk.CTkFont(size=12),
+            ).pack(side="left", padx=6)
+            ctk.CTkLabel(
+                btn_frame2,
+                text="Importable directo\nen WHM > Restore",
+                font=ctk.CTkFont(size=10), text_color="#8892b0",
+            ).pack(side="left", padx=8)
 
     def _get_name(self):
         name = self.name_entry.get().strip()
@@ -545,6 +600,14 @@ class PackagingDialog(ctk.CTkToplevel):
         self.destroy()
         threading.Thread(target=self.parent_app._do_package_targz,
                          args=(self.extract_dir, out_path), daemon=True).start()
+
+    def _do_cpanel_partial(self):
+        name = self._get_name() + "-critico"
+        out_path = Path(self.backup_path).parent / f"{name}.tar.gz"
+        self.destroy()
+        threading.Thread(target=self.parent_app._do_package_cpanel_partial,
+                         args=(self.extract_dir, self.backup_info, out_path),
+                         daemon=True).start()
 
     def _do_copy(self):
         self.destroy()

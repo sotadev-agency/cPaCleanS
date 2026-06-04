@@ -57,6 +57,8 @@ class ScanResult:
     # v2.2.0 — filtro de rutas criticas
     critical_only_mode: bool = False
     omitted_paths_count: int = 0
+    # v2.2.3 — log de plugins/temas separados
+    plugins_temas_log: list = field(default_factory=list)
 
 
 # --- Multiprocessing worker con scanners persistentes por proceso ---
