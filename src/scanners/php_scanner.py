@@ -122,7 +122,6 @@ class PHPScanner:
 
         content_lower = content.lower()
         if not any(kw.lower() in content_lower for kw in fast_kw):
-            self._check_suspicious_filenames(file_path, [])
             findings = []
             self._check_suspicious_filenames(file_path, findings)
             return findings

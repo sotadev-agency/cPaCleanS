@@ -12,6 +12,7 @@ from typing import Callable
 
 from ..config.settings import (
     load_config, CLEAN_MODE_NORMAL, CLEAN_MODE_INTERMEDIATE, CLEAN_MODE_STRICT,
+    CPANEL_PROTECTED_DIRS,
 )
 
 CONFIRMED_MALWARE_CATEGORIES = {
@@ -91,6 +92,7 @@ class ScanEngine:
         self.scanner_classes = []
         self.result = ScanResult()
         self._cancelled = False
+        self._extract_dir = ""  # guardado en scan_directory para uso en clean_findings
 
     def register_scanner_class(self, scanner_class):
         self.scanner_classes.append(scanner_class)
@@ -105,6 +107,7 @@ class ScanEngine:
         if backup_info:
             self.result.cms_detected = backup_info.cms_detected
 
+        self._extract_dir = str(directory)
         self.result.critical_only_mode = critical_only
         files_to_scan, omitted = self._collect_files(directory, critical_only=critical_only)
         self.result.omitted_paths_count = omitted
@@ -253,7 +256,7 @@ class ScanEngine:
 
         if critical_only:
             from .path_filter import filter_files
-            return filter_files(files, critical_only=True)
+            return filter_files(files, critical_only=True, base_dir=str(directory))
 
         return files, 0
 
@@ -297,6 +300,11 @@ class ScanEngine:
             if not should_clean:
                 continue
 
+            # Nunca cuarentenar archivos core de cPanel necesarios para restore en WHM
+            if self._is_cpanel_protected(str(fp)):
+                self.progress_callback("status", f"[PROTEGIDO cPanel] {fp.name} — no cuarentenado")
+                continue
+
             try:
                 safe_name = fp.name
                 counter = 0
@@ -320,6 +328,18 @@ class ScanEngine:
 
         self.result.total_cleaned = cleaned
         return cleaned
+
+    def _is_cpanel_protected(self, file_path: str) -> bool:
+        """Retorna True si el archivo es core de cPanel y NO debe ser cuarentenado.
+        Evalua solo los primeros 3 segmentos de la ruta relativa al extract_dir."""
+        if not self._extract_dir:
+            return False
+        try:
+            rel = Path(file_path).relative_to(self._extract_dir)
+            top_parts = {p.lower() for p in rel.parts[:3]}
+            return bool(top_parts & CPANEL_PROTECTED_DIRS)
+        except ValueError:
+            return False
 
     def clean_zero_byte_files(self, extract_dir: str, mode: str = CLEAN_MODE_NORMAL) -> int:
         """Mueve o elimina archivos de 0 bytes que generan basura."""

@@ -9,7 +9,7 @@
 
 **cPacleanS** es una herramienta de escritorio para Windows que escanea y limpia malware de backups cPanel (.tar.gz, .zip). Está dirigida a administradores de servidores web que necesitan sanear sitios infectados antes de restaurarlos.
 
-- **Versión actual:** 2.2.0
+- **Versión actual:** 2.2.2
 - **Lenguaje:** Python 3.11+
 - **Plataforma:** Windows 10/11 64-bit
 - **Entrada:** Archivo de backup cPanel (`.tar.gz`, `.zip`, `.tar`, `.gz`)
@@ -240,7 +240,7 @@ BackupPackager.package()            (opcional, generate_targz=True)
 - `database_scanner`: máximo 500 hallazgos por archivo SQL
 - `yara_scanner`: omite archivos > 10 MB, timeout 30 s por archivo
 
-**Limitaciones actuales v2.2.0:**
+**Limitaciones actuales v2.2.2:**
 - Restauración de plugins/temas solo funciona para **WordPress** (Joomla y Moodle restauran core pero no extensiones)
 - Restauración de **Laravel**: no aplica (aplicación custom) — la herramienta detecta la versión y advierte ejecutar `composer install` manualmente
 - Lista de plugins maliciosos: 48 entradas en `cms_scanner.py` — puede ampliarse añadiendo a `KNOWN_MALICIOUS_PLUGINS`
@@ -310,6 +310,8 @@ pyinstaller cPacleanS.spec
 | 2.0.1 | Log visual por fases, escaneo de reinfección, modo VT deep, bloqueo de controles UI |
 | 2.1.0 | Fix truncate filenames, limpieza archivos 0KB, separación plugins premium/sospechosos, rutas relativas en reporte |
 | 2.2.0 | Modo "Solo contenido crítico" (whitelist/blacklist rutas cPanel), restauración Joomla/Moodle/Laravel, 48 plugins maliciosos, botón validar API key VT |
+| 2.2.1 | Fix: doble llamada redundante en php_scanner; Fix: API yara-python ≥4.3 (StringMatch); Fix: spec agrega collect_all(fpdf) para PDF en exe, hidden imports multiprocessing |
+| 2.2.2 | Fix crítico: path_filter usaba ruta absoluta — 'Temp' de AppData bloqueaba TODOS los archivos (0 detecciones); cPanel core preservation en clean_findings; Full rebuild CMS (elimina dirs infectados, instala core limpio); OJS soporte; CPANEL_PROTECTED_DIRS en settings |
 
 ---
 

@@ -68,12 +68,24 @@ class YaraScanner:
                 description = meta.get("description", match.rule)
 
                 strings_found = []
-                for offset, identifier, data in match.strings:
-                    try:
-                        decoded = data.decode("utf-8", errors="replace")[:100]
-                    except AttributeError:
-                        decoded = str(data)[:100]
-                    strings_found.append(f"{identifier}: {decoded}")
+                for string_match in match.strings:
+                    # yara-python >= 4.3: StringMatch objects; < 4.3: (offset, id, data) tuples
+                    if hasattr(string_match, "instances"):
+                        identifier = string_match.identifier
+                        for inst in string_match.instances:
+                            try:
+                                decoded = inst.matched_data.decode("utf-8", errors="replace")[:100]
+                            except (AttributeError, UnicodeDecodeError):
+                                decoded = str(getattr(inst, "matched_data", ""))[:100]
+                            strings_found.append(f"{identifier}: {decoded}")
+                    else:
+                        # backward compat: tuple (offset, identifier, data)
+                        try:
+                            _, identifier, data = string_match
+                            decoded = data.decode("utf-8", errors="replace")[:100] if isinstance(data, bytes) else str(data)[:100]
+                            strings_found.append(f"{identifier}: {decoded}")
+                        except Exception:
+                            pass
 
                 findings.append(Finding(
                     file_path=file_path,

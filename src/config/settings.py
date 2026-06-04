@@ -5,7 +5,25 @@ import multiprocessing
 from pathlib import Path
 
 APP_NAME = "cPacleanS"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.2"
+
+# Directorios de cPanel que WHM necesita para restaurar dominios correctamente.
+# Nunca deben ser cuarentenados aunque contengan patrones sospechosos.
+CPANEL_PROTECTED_DIRS = frozenset({
+    "etc",       # Configuracion de usuario: quota, subdominios, parked domains
+    "userdata",  # Config virtual hosts de TODOS los dominios (critico para addon domains)
+    "dns",       # Zonas DNS del usuario
+    "cp",        # Datos del panel cPanel del usuario
+})
+
+# Archivos raiz de WordPress que son CORE (no archivos del usuario).
+# Usados en el rebuild completo para saber que eliminar y reinstalar.
+WP_CORE_ROOT_FILES = frozenset({
+    "index.php", "wp-activate.php", "wp-blog-header.php",
+    "wp-comments-post.php", "wp-cron.php", "wp-links-opml.php",
+    "wp-load.php", "wp-login.php", "wp-mail.php", "wp-settings.php",
+    "wp-signup.php", "wp-trackback.php", "xmlrpc.php",
+})
 
 SCAN_MODE_ONLY = "scan_only"
 CLEAN_MODE_NORMAL = "normal"
@@ -37,6 +55,7 @@ DEFAULT_CONFIG = {
         "moodle": ["config.php", "mod", "lib/moodlelib.php"],
         "laravel": ["artisan", "app/Http", ".env"],
         "softaculous": ["softaculous", "ACPLsoft"],
+        "ojs": ["config.TEMPLATE.inc.php"],  # Open Journal Systems
     },
     "severity_levels": {
         "critical": {"color": "#FF0000", "label": "Crítico"},
