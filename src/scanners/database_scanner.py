@@ -39,6 +39,18 @@ SQL_PATTERNS = [
 ]
 
 
+_WP_OPTIONS_RE = re.compile(
+    r"INSERT\s+INTO\s+[`'\"]?\w*options[`'\"]?\s", re.IGNORECASE
+)
+_WP_SAFE_OPTION_RE = re.compile(
+    r"""(?:'|")(widget_\w+|theme_mods_\w+|sidebars_widgets|"""
+    r"""auto_load\w*|cron|_transient_\w+|_site_transient_\w+|"""
+    r"""rewrite_rules|active_plugins|uninstall_plugins|"""
+    r"""dismissed_wp_pointers|recently_activated|widget_block)(?:'|")""",
+    re.IGNORECASE,
+)
+
+
 class DatabaseScanner:
     name = "Database Scanner"
 
@@ -68,16 +80,24 @@ class DatabaseScanner:
                     break
                 if len(line) > 2_000_000:
                     continue
+                is_wp_safe_opt = (
+                    _WP_OPTIONS_RE.search(line) and _WP_SAFE_OPTION_RE.search(line)
+                )
                 for compiled, sev, cat, desc in self._compiled:
                     match = compiled.search(line)
                     if match:
+                        actual_sev = sev
+                        actual_desc = desc
+                        if is_wp_safe_opt and sev in ("critical", "high", "medium"):
+                            actual_sev = "low"
+                            actual_desc = f"{desc} — Contenido serializado normal de WordPress"
                         ctx = match.group(0)[:200]
                         findings.append(Finding(
                             file_path=file_path,
                             line_number=line_num,
-                            severity=sev,
+                            severity=actual_sev,
                             category=cat,
-                            description=desc,
+                            description=actual_desc,
                             matched_pattern=compiled.pattern[:80],
                             context=ctx,
                         ))

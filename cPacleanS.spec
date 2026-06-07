@@ -1,30 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-# cPacleanS v2.3.0 — PyInstaller spec con VersionInfo para Windows
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('src/signatures', 'src/signatures')]
 binaries = []
-hiddenimports = [
-    'customtkinter', 'jinja2', 'requests', 'chardet',
-    'fpdf', 'fpdf.fpdf', 'fpdf.output', 'fpdf.fonts',
-    'multiprocessing', 'multiprocessing.pool', 'multiprocessing.managers',
-    'multiprocessing.resource_tracker', 'multiprocessing.popen_spawn_win32',
-    'concurrent.futures', 'concurrent.futures.process',
-    'psutil', 'PIL', 'phpserialize',
-    'bz2', 'gzip',
-]
-
-# Incluye customtkinter completo (temas, fuentes, assets)
+hiddenimports = ['customtkinter', 'jinja2', 'requests', 'chardet', 'fpdf', 'multiprocessing']
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
-# Incluye fpdf2 completo (fuentes embebidas, necesarias para generar PDF)
-tmp_fpdf = collect_all('fpdf')
-datas += tmp_fpdf[0]; binaries += tmp_fpdf[1]; hiddenimports += tmp_fpdf[2]
-
 
 a = Analysis(
-    ['main.py'],
+    ['C:\\Users\\SSW\\Documents\\limpiador_malware\\main.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -57,7 +42,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets\\icon.ico'],
-    # VersionInfo embebida en el PE — mejora reconocimiento por antivirus
-    version='version_info.txt',
+    icon=['C:\\Users\\SSW\\Documents\\limpiador_malware\\assets\\icon.ico'],
 )

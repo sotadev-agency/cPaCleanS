@@ -269,25 +269,22 @@ class CMSPluginCleaner:
 
         count = 0
         detector = _VERSION_DETECTORS.get(cms, {}).get(addon_type)
-
         is_active_set = self._get_active_set(cms, addon_type, active)
 
+        # Fase 1: cuarentena/eliminacion secuencial + recolectar activos
+        to_reinstall = []
         for item in items:
             version = detector(item) if detector else ""
             slug = item.name
             is_active = slug in is_active_set if is_active_set else True
 
             entry = {
-                "cms":           cms,
-                "type":          addon_type,
-                "name":          slug,
-                "version":       version or "desconocida",
-                "original_path": str(item),
-                "is_active":     is_active,
+                "cms": cms, "type": addon_type, "name": slug,
+                "version": version or "desconocida",
+                "original_path": str(item), "is_active": is_active,
             }
             self.progress_callback("status", f"[{cms.upper()}] {addon_type}: {slug}...")
 
-            # Paso 2: Mover TODO a cuarentena o eliminar
             if self.clean_mode == "strict":
                 try:
                     shutil.rmtree(str(item))
@@ -310,14 +307,30 @@ class CMSPluginCleaner:
                     entry["action"] = f"error: {e}"
 
             self.removal_log.append(entry)
-
-            # Paso 3-4: Reinstalar activos desde repo oficial
             if is_active and entry.get("action") in ("cuarentena", "eliminado"):
-                reinstalled = self._reinstall_from_repo(cms, addon_type, slug,
-                                                         addon_dir, version)
-                entry["reinstalled"] = reinstalled
-                if reinstalled:
-                    entry["reinstalled_version"] = reinstalled.get("version", "")
+                to_reinstall.append((entry, slug, version))
+
+        # Fase 2: reinstalacion paralela (I/O bound)
+        if to_reinstall:
+            from concurrent.futures import ThreadPoolExecutor, as_completed as _ac
+            total = len(to_reinstall)
+
+            def _do_reinstall(args):
+                _, slug, ver = args
+                return self._reinstall_from_repo(cms, addon_type, slug, addon_dir, ver)
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futs = {pool.submit(_do_reinstall, a): a for a in to_reinstall}
+                done = 0
+                for fut in _ac(futs):
+                    done += 1
+                    self.progress_callback("status",
+                        f"[{cms.upper()}] Reinstalando {done} de {total}...")
+                    entry, slug, _ = futs[fut]
+                    reinstalled = fut.result()
+                    entry["reinstalled"] = reinstalled
+                    if reinstalled:
+                        entry["reinstalled_version"] = reinstalled.get("version", "")
 
         return count
 
@@ -344,10 +357,60 @@ class CMSPluginCleaner:
 
     # -- Reinstalacion desde repos oficiales --
 
+    # ── v2.6.0: Filtro de reputacion ──
+
+    _SUSPICIOUS_SLUG_PATTERNS = [
+        (re.compile(r'\bnull(?:ed)?\b', re.IGNORECASE), "nulled_in_name"),
+        (re.compile(r'\bcrack\b', re.IGNORECASE), "crack_in_name"),
+        (re.compile(r'\bfree-?pro\b', re.IGNORECASE), "freepro_in_name"),
+        (re.compile(r'\bpremium-?free\b', re.IGNORECASE), "premiumfree_in_name"),
+        (re.compile(r'\bpirat', re.IGNORECASE), "piracy_in_name"),
+        (re.compile(r'[0-9]{6,}'), "long_numeric_sequence"),
+        (re.compile(r'^[a-z]{1,4}$'), "slug_too_short"),
+        (re.compile(r'^(?:[a-z]{2,4}-){3,}[a-z]{1,4}$'), "slug_random_pattern"),
+    ]
+
+    def _should_reinstall(self, slug: str, version: str) -> tuple:
+        """Filtro de reputacion v2.6.0. Retorna (should_reinstall, reason)."""
+        # Regla 1: Patrones de nombre sospechoso (check primero, sin HTTP)
+        for pattern, reason_code in self._SUSPICIOUS_SLUG_PATTERNS:
+            if pattern.search(slug):
+                return False, reason_code
+
+        # Regla 2: Disponibilidad en WP.org API
+        try:
+            resp = requests.get(WP_PLUGIN_API.format(slug=slug), timeout=10)
+            if resp.status_code != 200:
+                return False, "not_in_wporg_api"
+            data = resp.json()
+            if not isinstance(data, dict) or "download_link" not in data:
+                return False, "not_in_wporg_api"
+
+            # Regla 3: Rating minimo
+            rating = data.get("rating")
+            if rating is not None:
+                # WP.org rating es 0-100, convertir a 0-5
+                rating_5 = float(rating) / 20.0
+                if rating_5 < 3.0:
+                    return False, f"low_wporg_rating_{rating_5:.1f}"
+
+        except (requests.RequestException, json.JSONDecodeError, ValueError):
+            # Si falla la conexion, permitir reinstalacion
+            pass
+
+        return True, ""
+
     def _reinstall_from_repo(self, cms: str, addon_type: str, slug: str,
                               addon_dir: Path, original_version: str) -> dict:
         """Descarga e instala version limpia desde repo oficial. Solo WordPress soportado."""
         if cms == "wordpress":
+            # v2.6.0: Filtro de reputacion antes de reinstalar
+            should_install, skip_reason = self._should_reinstall(slug, original_version)
+            if not should_install:
+                self.progress_callback("status",
+                    f"[WP] {slug}: no reinstalado — {skip_reason}")
+                return {"slug": slug, "status": "not_reinstalled",
+                        "skip_reason": skip_reason}
             return self._reinstall_wp(addon_type, slug, addon_dir, original_version)
 
         entry = {"slug": slug, "status": "manual_required",

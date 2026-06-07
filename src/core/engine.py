@@ -1,6 +1,7 @@
 """Motor de escaneo de alto rendimiento — pool de procesos con scanners persistentes."""
 import os
 import re
+import math
 import time
 import hashlib
 import shutil
@@ -12,7 +13,7 @@ from typing import Callable
 
 from ..config.settings import (
     load_config, CLEAN_MODE_NORMAL, CLEAN_MODE_INTERMEDIATE, CLEAN_MODE_STRICT,
-    CPANEL_PROTECTED_DIRS,
+    CPANEL_PROTECTED_DIRS, CONFIG_DIR, WP_TRUSTED_SLUGS,
 )
 
 CONFIRMED_MALWARE_CATEGORIES = {
@@ -36,6 +37,7 @@ class Finding:
     cleaned: bool = False
     sha256: str = ""
     confirmed_malware: bool = False
+    confidence_score: int = 0
 
 
 @dataclass
@@ -63,21 +65,63 @@ class ScanResult:
     db_interventions_log: list = field(default_factory=list)
     # v2.3.0 — prefijos de tablas detectados por CMS
     db_prefixes: dict = field(default_factory=dict)
+    # v2.6.0 — archivos residuales eliminados
+    junk_files_log: list = field(default_factory=list)
+    # v2.6.0 — posts SPAM eliminados de BD WordPress
+    spam_posts_log: list = field(default_factory=list)
+    # v2.6.0 — resultado del wipe CMS
+    wipe_result: dict = field(default_factory=dict)
+    # v2.6.0 — manifiesto del empaquetado modo critico
+    critical_output_manifest: dict = field(default_factory=dict)
 
 
 # --- Multiprocessing worker con scanners persistentes por proceso ---
 _worker_scanners = None
+_worker_cache = None
 
 
-def _worker_init(scanner_classes):
-    global _worker_scanners
+def _file_sha256(file_path):
+    sha = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                sha.update(chunk)
+        return sha.hexdigest()
+    except (OSError, PermissionError):
+        return ""
+
+
+def _worker_init(scanner_classes, cache_db_path=None):
+    global _worker_scanners, _worker_cache
     _worker_scanners = [cls() for cls in scanner_classes]
+    if cache_db_path:
+        try:
+            from ..utils.hash_cache import HashCache
+            _worker_cache = HashCache(cache_db_path)
+        except Exception:
+            _worker_cache = None
+    else:
+        _worker_cache = None
 
 
 def _worker_scan_batch(file_batch):
-    """Escanea un lote de archivos con scanners ya instanciados."""
+    """Escanea un lote de archivos con scanners ya instanciados.
+    v2.5.0: integra cache SHA256 — archivos identicos no se re-escanean."""
     results = []
     for file_path in file_batch:
+        file_hash = ""
+        # Cache lookup
+        if _worker_cache:
+            file_hash = _file_sha256(file_path)
+            if file_hash:
+                cached = _worker_cache.get(file_hash)
+                if cached and cached["scan_result"] is not None:
+                    for fd in cached["scan_result"]:
+                        fd["file_path"] = file_path
+                        fd["sha256"] = file_hash
+                        results.append(Finding(**fd))
+                    continue
+
         file_findings = []
         for scanner in _worker_scanners:
             try:
@@ -86,6 +130,21 @@ def _worker_scan_batch(file_batch):
                     file_findings.extend(r)
             except Exception:
                 pass
+
+        if file_hash:
+            for f in file_findings:
+                f.sha256 = file_hash
+
+        # Cache store
+        if _worker_cache and file_hash:
+            cache_data = [
+                {"line_number": f.line_number, "severity": f.severity,
+                 "category": f.category, "description": f.description,
+                 "matched_pattern": f.matched_pattern, "context": f.context}
+                for f in file_findings
+            ] if file_findings else []
+            _worker_cache.put(file_hash, cache_data)
+
         if file_findings:
             results.extend(file_findings)
     return results
@@ -99,6 +158,7 @@ class ScanEngine:
         self.result = ScanResult()
         self._cancelled = False
         self._extract_dir = ""  # guardado en scan_directory para uso en clean_findings
+        self._cache_db_path = str(CONFIG_DIR / "scan_cache.db")
 
     def register_scanner_class(self, scanner_class):
         self.scanner_classes.append(scanner_class)
@@ -143,41 +203,83 @@ class ScanEngine:
         self._build_summaries()
         return self.result
 
+    SEVERITY_WEIGHTS = {"critical": 40, "high": 25, "medium": 10, "low": 5, "info": 0}
+
     def _classify_findings(self):
-        for f in self.result.findings:
-            f.confirmed_malware = (
-                f.category in CONFIRMED_MALWARE_CATEGORIES
-                and f.severity in ("critical", "high")
-            )
+        """Scoring de confianza 0-100 por finding.
+        Threshold configurable determina confirmed_malware."""
+        threshold = self.config.get("confidence_threshold", 70)
 
         hits_per_file = {}
         for f in self.result.findings:
-            fp = f.file_path
-            if fp not in hits_per_file:
-                hits_per_file[fp] = {"categories": set(), "severities": set(), "count": 0}
-            hits_per_file[fp]["categories"].add(f.category)
-            hits_per_file[fp]["severities"].add(f.severity)
-            hits_per_file[fp]["count"] += 1
+            hits_per_file[f.file_path] = hits_per_file.get(f.file_path, 0) + 1
 
+        entropy_cache = {}
         for f in self.result.findings:
-            if f.confirmed_malware:
-                continue
-            info = hits_per_file.get(f.file_path)
-            if not info:
-                continue
-            cats = info["categories"]
-            has_exec = cats & {"injection", "webshell", "backdoor"}
-            has_obfusc = cats & {"obfuscation"}
-            high_sev = "critical" in info["severities"] or "high" in info["severities"]
-            if has_exec and has_obfusc and high_sev and info["count"] >= 3:
-                f.confirmed_malware = True
+            fp = f.file_path
+            score = self.SEVERITY_WEIGHTS.get(f.severity, 0)
+
+            if f.category in CONFIRMED_MALWARE_CATEGORIES:
+                score += 15
+
+            if fp not in entropy_cache:
+                entropy_cache[fp] = self._file_entropy(fp)
+            if entropy_cache[fp] > 6.0:
+                score += 10
+
+            count = hits_per_file.get(fp, 0)
+            if count >= 3:
+                score += 10 + (count - 3) * 5
+
+            fp_norm = fp.replace("\\", "/").lower()
+            if self._in_trusted_plugin(fp_norm):
+                score -= 20
+            if self._in_testing_dir(fp_norm):
+                score -= 15
+
+            f.confidence_score = max(0, min(100, score))
+            f.confirmed_malware = f.confidence_score >= threshold
+
+    @staticmethod
+    def _file_entropy(file_path):
+        try:
+            with open(file_path, "rb") as f:
+                data = f.read(65536)
+            if not data:
+                return 0.0
+            freq = [0] * 256
+            for b in data:
+                freq[b] += 1
+            length = len(data)
+            return -sum(
+                (c / length) * math.log2(c / length)
+                for c in freq if c > 0
+            )
+        except (OSError, PermissionError):
+            return 0.0
+
+    @staticmethod
+    def _in_trusted_plugin(fp_norm):
+        for seg in ("plugins", "themes"):
+            marker = f"/wp-content/{seg}/"
+            idx = fp_norm.find(marker)
+            if idx >= 0:
+                slug = fp_norm[idx + len(marker):].split("/")[0]
+                if slug in WP_TRUSTED_SLUGS:
+                    return True
+        return False
+
+    @staticmethod
+    def _in_testing_dir(fp_norm):
+        return any(d in fp_norm for d in
+                   ("/vendor/", "/node_modules/", "/tests/", "/test/", "/phpunit/", "/.git/"))
 
     def _scan_multiprocess(self, batches, total, workers):
         processed = 0
         with ProcessPoolExecutor(
             max_workers=workers,
             initializer=_worker_init,
-            initargs=(self.scanner_classes,)
+            initargs=(self.scanner_classes, self._cache_db_path)
         ) as executor:
             futures = {executor.submit(_worker_scan_batch, batch): len(batch) for batch in batches}
 
@@ -227,13 +329,13 @@ class ScanEngine:
                     pass
 
     def _collect_files(self, directory: Path, critical_only: bool = False) -> tuple:
-        """Recopila archivos a escanear. Retorna (archivos, omitidos)."""
+        """Recopila archivos via os.scandir recursivo (mas rapido que os.walk).
+        Filtra extensiones y dirs excluidos durante el recorrido."""
         all_extensions = set()
         for exts in self.config["scan_extensions"].values():
             all_extensions.update(exts)
 
         max_size = self.config["max_file_size_mb"] * 1024 * 1024
-        files = []
 
         important_names = {
             ".htaccess", ".env", "wp-config.php", "configuration.php",
@@ -241,28 +343,34 @@ class ScanEngine:
         }
 
         compound_extensions = {e for e in all_extensions if e.count(".") > 1}
+        excluded_dirs = {d.lower() for d in self.config.get("excluded_dirs", [])}
 
-        for root, _, filenames in os.walk(directory):
-            for fname in filenames:
-                fp = Path(root) / fname
-                ext = fp.suffix.lower()
-                name_lower = fname.lower()
+        files = []
 
-                has_compound = any(name_lower.endswith(ce) for ce in compound_extensions)
-                should_scan = (
-                    ext in all_extensions
-                    or has_compound
-                    or name_lower in important_names
-                    or name_lower.startswith(".")
-                )
+        def _recurse(path):
+            try:
+                with os.scandir(path) as it:
+                    for entry in it:
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name.lower() not in excluded_dirs:
+                                _recurse(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            name_lower = entry.name.lower()
+                            ext = os.path.splitext(name_lower)[1]
+                            has_compound = any(name_lower.endswith(ce) for ce in compound_extensions)
+                            if (ext in all_extensions or has_compound
+                                    or name_lower in important_names
+                                    or name_lower.startswith(".")):
+                                try:
+                                    sz = entry.stat().st_size
+                                    if 0 < sz <= max_size:
+                                        files.append(entry.path)
+                                except OSError:
+                                    pass
+            except (OSError, PermissionError):
+                pass
 
-                if should_scan:
-                    try:
-                        sz = fp.stat().st_size
-                        if 0 < sz <= max_size:
-                            files.append(str(fp))
-                    except OSError:
-                        pass
+        _recurse(str(directory))
 
         if critical_only:
             from .path_filter import filter_files

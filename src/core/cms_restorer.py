@@ -237,6 +237,7 @@ class CMSRestorer:
         if not plugins_dir.exists():
             return
 
+        slugs = []
         for plugin_dir in plugins_dir.iterdir():
             if not plugin_dir.is_dir():
                 continue
@@ -244,31 +245,48 @@ class CMSRestorer:
             if active_plugins and slug not in active_plugins:
                 self.log.append({"type": "info", "cms": "wordpress", "message": f"Plugin '{slug}' inactivo, omitido"})
                 continue
-            self.progress_callback("status", f"Plugin: {slug}...")
+            slugs.append(slug)
+
+        if not slugs:
+            return
+
+        total = len(slugs)
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _ac
+
+        def _restore_one(slug):
             try:
-                url = WP_PLUGIN_API.format(slug=slug)
-                resp = requests.get(url, timeout=15)
+                resp = requests.get(WP_PLUGIN_API.format(slug=slug), timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
                     if isinstance(data, dict) and "download_link" in data:
                         version = data.get("version", "?")
-                        clean_plugin = self._download_and_extract_zip(slug, data["download_link"], "plugin")
-                        if clean_plugin:
-                            rebuilt = self._full_rebuild_dirs(plugin_dir, clean_plugin, ["."], cms_key="wordpress")
-                            self.log.append({"type": "success", "cms": "wordpress",
-                                           "message": f"Plugin '{slug}' v{version}: {rebuilt} archivos"})
-                        continue
-                self.log.append({"type": "warning", "cms": "wordpress",
-                               "message": f"Plugin '{slug}' no en WordPress.org (premium/custom)"})
+                        clean = self._download_and_extract_zip(slug, data["download_link"], "plugin")
+                        if clean:
+                            n = self._full_rebuild_dirs(plugins_dir / slug, clean, ["."], cms_key="wordpress")
+                            return {"type": "success", "cms": "wordpress",
+                                    "message": f"Plugin '{slug}' v{version}: {n} archivos"}
+                return {"type": "warning", "cms": "wordpress",
+                        "message": f"Plugin '{slug}' no en WordPress.org (premium/custom)"}
             except (requests.RequestException, json.JSONDecodeError, ValueError):
-                self.log.append({"type": "warning", "cms": "wordpress",
-                               "message": f"Plugin '{slug}': no se pudo verificar"})
+                return {"type": "warning", "cms": "wordpress",
+                        "message": f"Plugin '{slug}': no se pudo verificar"}
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futs = {pool.submit(_restore_one, s): s for s in slugs}
+            done = 0
+            for fut in _ac(futs):
+                done += 1
+                self.progress_callback("status", f"Descargando plugin {done} de {total}...")
+                entry = fut.result()
+                if entry:
+                    self.log.append(entry)
 
     def _restore_wp_themes(self, wp_root: Path, active_theme: str):
         themes_dir = wp_root / "wp-content" / "themes"
         if not themes_dir.exists():
             return
 
+        slugs = []
         for theme_dir in themes_dir.iterdir():
             if not theme_dir.is_dir():
                 continue
@@ -276,25 +294,41 @@ class CMSRestorer:
             if active_theme and slug != active_theme:
                 self.log.append({"type": "info", "cms": "wordpress", "message": f"Tema '{slug}' inactivo, omitido"})
                 continue
-            self.progress_callback("status", f"Tema: {slug}...")
+            slugs.append(slug)
+
+        if not slugs:
+            return
+
+        total = len(slugs)
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _ac
+
+        def _restore_one(slug):
             try:
-                url = WP_THEME_API.format(slug=slug)
-                resp = requests.get(url, timeout=15)
+                resp = requests.get(WP_THEME_API.format(slug=slug), timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
                     if isinstance(data, dict) and "download_link" in data:
                         version = data.get("version", "?")
-                        clean_theme = self._download_and_extract_zip(slug, data["download_link"], "theme")
-                        if clean_theme:
-                            rebuilt = self._full_rebuild_dirs(theme_dir, clean_theme, ["."], cms_key="wordpress")
-                            self.log.append({"type": "success", "cms": "wordpress",
-                                           "message": f"Tema '{slug}' v{version}: {rebuilt} archivos"})
-                        continue
-                self.log.append({"type": "warning", "cms": "wordpress",
-                               "message": f"Tema '{slug}' no en WordPress.org (premium)"})
+                        clean = self._download_and_extract_zip(slug, data["download_link"], "theme")
+                        if clean:
+                            n = self._full_rebuild_dirs(themes_dir / slug, clean, ["."], cms_key="wordpress")
+                            return {"type": "success", "cms": "wordpress",
+                                    "message": f"Tema '{slug}' v{version}: {n} archivos"}
+                return {"type": "warning", "cms": "wordpress",
+                        "message": f"Tema '{slug}' no en WordPress.org (premium)"}
             except (requests.RequestException, json.JSONDecodeError, ValueError):
-                self.log.append({"type": "warning", "cms": "wordpress",
-                               "message": f"Tema '{slug}': no se pudo verificar"})
+                return {"type": "warning", "cms": "wordpress",
+                        "message": f"Tema '{slug}': no se pudo verificar"}
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futs = {pool.submit(_restore_one, s): s for s in slugs}
+            done = 0
+            for fut in _ac(futs):
+                done += 1
+                self.progress_callback("status", f"Descargando tema {done} de {total}...")
+                entry = fut.result()
+                if entry:
+                    self.log.append(entry)
 
     def _download_and_extract_zip(self, slug: str, url: str, kind: str) -> Path:
         cache_file = self._cache_dir / f"wp-{kind}-{slug}.zip"

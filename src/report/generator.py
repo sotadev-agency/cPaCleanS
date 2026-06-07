@@ -73,6 +73,10 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
         .b-low { background: #00C851; }
         .confirmed { color: #ff4444; font-weight: 700; font-size: 11px; }
         .suspect { color: #ffaa00; font-size: 11px; }
+        .score { display: inline-block; min-width: 28px; text-align: center; padding: 2px 6px; border-radius: 8px; font-size: 10px; font-weight: 700; color: #fff; }
+        .sc-high { background: #ff4444; }
+        .sc-med { background: #ffbb33; color: #333; }
+        .sc-low { background: #00C851; }
         .cleaned { background: #00C851; color: #fff; padding: 1px 6px; border-radius: 6px; font-size: 10px; }
         .bar-row { display: flex; align-items: center; margin: 2px 0; }
         .bar-label { width: 130px; font-size: 11px; color: #8892b0; overflow: hidden; text-overflow: ellipsis; }
@@ -146,12 +150,13 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     </div>
     {% endif %}
 
-    {% if result.db_interventions_log %}
+    {% if db_interventions_filtered %}
     <div class="box" style="border-color:#4a0f0f;">
-        <h2 style="color:#ff6666;">Intervenciones en Base de Datos ({{ result.db_interventions_log|length }})</h2>
+        <h2 style="color:#ff6666;">Intervenciones en Base de Datos ({{ db_interventions_filtered|length }}{% if db_interventions_omitted %} de {{ db_interventions_total }}{% endif %})</h2>
         <p style="color:#8892b0; font-size:11px; margin-bottom:10px;">
             Solo se eliminan filas con malware CRITICO CONFIRMADO en tablas protegidas.
             Las filas sospechosas se marcan para revision manual.
+            {% if db_interventions_omitted %}<br>{{ db_interventions_omitted }} registros omitidos por datos insuficientes (menos de 4/5 campos confirmados).{% endif %}
         </p>
         <table>
             <thead>
@@ -160,7 +165,7 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
                 </tr>
             </thead>
             <tbody>
-            {% for e in result.db_interventions_log %}
+            {% for e in db_interventions_filtered %}
             <tr>
                 <td style="font-size:11px;">{{ e.file }}</td>
                 <td style="font-weight:600;">{{ e.table }}</td>
@@ -230,6 +235,7 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
             <thead>
                 <tr>
                     <th>Sev.</th>
+                    <th>Score</th>
                     <th>Tipo</th>
                     <th>Archivo</th>
                     <th>Ruta</th>
@@ -243,6 +249,7 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
                 {% for f in findings_sorted %}
                 <tr>
                     <td><span class="badge b-{{ f.severity }}">{{ f.severity|upper }}</span></td>
+                    <td><span class="score {% if f.confidence_score >= 70 %}sc-high{% elif f.confidence_score >= 30 %}sc-med{% else %}sc-low{% endif %}">{{ f.confidence_score }}</span></td>
                     <td>{% if f.confirmed_malware %}<span class="confirmed">CONFIRMADO</span>{% else %}<span class="suspect">Sospechoso</span>{% endif %}</td>
                     <td class="fname">{{ f.file_path|short_name }}</td>
                     <td class="fname" style="font-size:10px;color:#8892b0;">{{ f.file_path|malware_ruta }}</td>
@@ -255,6 +262,59 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
             </tbody>
         </table>
     </div>
+
+    {% if result.junk_files_log %}
+    <div class="box" style="border-color:#4a3a0f;">
+        <h2 style="color:#ffbb33;">Archivos Residuales ({{ result.junk_files_log|length }})</h2>
+        <p style="color:#8892b0; font-size:11px; margin-bottom:10px;">
+            Archivos no pertenecientes al CMS limpio eliminados o puestos en cuarentena.
+        </p>
+        <table>
+            <thead>
+                <tr><th>Ruta</th><th>CMS</th><th>Categoria</th><th>Accion</th></tr>
+            </thead>
+            <tbody>
+            {% for j in result.junk_files_log %}
+            <tr>
+                <td style="font-size:11px; word-break:break-all;">{{ j.path|truncate_path }}</td>
+                <td><span class="tag">{{ j.cms|upper }}</span></td>
+                <td>{{ j.category }}</td>
+                <td>{% if j.action == 'quarantined' %}<span style="color:#33b5e5;">cuarentena</span>
+                    {% elif j.action == 'deleted' %}<span style="color:#ff4444;">eliminado</span>
+                    {% else %}<span style="color:#8892b0;">solo reporte</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    {% if result.spam_posts_log %}
+    <div class="box" style="border-color:#4a0f2a;">
+        <h2 style="color:#ff6699;">Posts SPAM Eliminados ({{ result.spam_posts_log|length }})</h2>
+        <p style="color:#8892b0; font-size:11px; margin-bottom:10px;">
+            Publicaciones con contenido SPAM inyectado detectadas por scoring automatico.
+        </p>
+        <table>
+            <thead>
+                <tr><th>ID</th><th>Titulo</th><th>Score</th><th>Razones</th><th>Accion</th></tr>
+            </thead>
+            <tbody>
+            {% for s in result.spam_posts_log %}
+            <tr>
+                <td>{{ s.post_id }}</td>
+                <td style="font-size:11px;">{{ s.title_preview|e }}</td>
+                <td><span class="score {% if s.score >= 65 %}sc-high{% elif s.score >= 30 %}sc-med{% else %}sc-low{% endif %}">{{ s.score }}</span></td>
+                <td style="font-size:10px; color:#8892b0;">{{ s.reasons|join(', ') if s.reasons else '-' }}</td>
+                <td>{% if s.action == 'deleted' %}<span class="db-row-deleted">ELIMINADO</span>
+                    {% elif s.action == 'suspect_not_deleted' %}<span class="db-suspicious">NO ELIMINADO</span>
+                    {% else %}<span style="color:#8892b0;">solo reporte</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
 
     {% if result.virustotal_hits %}
     <div class="box">
@@ -284,6 +344,40 @@ class ReportGenerator:
     def __init__(self, output_dir: str = None):
         self.output_dir = Path(output_dir) if output_dir else Path.cwd()
 
+    @staticmethod
+    def _filter_db_interventions(entries: list) -> tuple:
+        """Filtra intervenciones de BD: solo mostrar registros con al menos
+        4 de 5 campos confirmados (archivo, tabla, post_id, detalle, fragmento).
+        Retorna (filtered_list, omitted_count, total_count).
+        """
+        if not entries:
+            return [], 0, 0
+
+        filtered = []
+        for e in entries:
+            # Contar campos con datos reales (no vacios ni placeholder)
+            fields_ok = 0
+            if e.get("file", "").strip():
+                fields_ok += 1
+            if e.get("table", "").strip():
+                fields_ok += 1
+            # post_id puede venir como int o string
+            post_id = e.get("post_id", "")
+            if post_id and str(post_id) not in ("", "0", "-"):
+                fields_ok += 1
+            if e.get("detail", "").strip():
+                fields_ok += 1
+            # fragmento = action o context segun disponibilidad
+            fragment = e.get("action", "") or e.get("context", "")
+            if fragment.strip():
+                fields_ok += 1
+
+            if fields_ok >= 4:
+                filtered.append(e)
+
+        omitted = len(entries) - len(filtered)
+        return filtered, omitted, len(entries)
+
     def generate(self, result: ScanResult, backup_path: str = "") -> str:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -293,6 +387,13 @@ class ReportGenerator:
         findings_sorted = sorted(result.findings, key=lambda f: severity_order.get(f.severity, 5))
         max_cat = max(result.summary_by_category.values(), default=1)
         confirmed_count = sum(1 for f in result.findings if f.confirmed_malware)
+
+        # v2.6.1: Filtrar intervenciones BD con umbral 4/5 campos
+        db_log = getattr(result, "db_interventions_log", None) or []
+        # Excluir spam_posts del filtrado (tienen su propia seccion)
+        db_log_no_spam = [e for e in db_log if e.get("type") != "spam_post"]
+        db_filtered, db_omitted, db_total = self._filter_db_interventions(
+            db_log_no_spam)
 
         env = Environment()
         env.filters["truncate_path"] = truncate_path
@@ -304,6 +405,9 @@ class ReportGenerator:
             result=result, findings_sorted=findings_sorted, confirmed_count=confirmed_count,
             generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             backup_path=backup_path, max_cat=max_cat, app_version=APP_VERSION,
+            db_interventions_filtered=db_filtered,
+            db_interventions_omitted=db_omitted,
+            db_interventions_total=db_total,
         )
         output_path.write_text(html, encoding="utf-8")
         return str(output_path)
@@ -412,22 +516,29 @@ class ReportGenerator:
                 pdf.ln(5)
                 shown_cms += 1
 
-        # -- Intervenciones en BD --
-        db_log = getattr(result, "db_interventions_log", None)
-        if db_log:
+        # -- Intervenciones en BD (v2.6.1: filtro 4/5 campos) --
+        db_log_raw = getattr(result, "db_interventions_log", None) or []
+        db_log_no_spam_pdf = [e for e in db_log_raw if e.get("type") != "spam_post"]
+        db_log_pdf, db_omitted_pdf, db_total_pdf = self._filter_db_interventions(
+            db_log_no_spam_pdf)
+        if db_log_pdf:
             pdf.ln(4)
             pdf.set_font("Helvetica", "B", 13)
             pdf.set_text_color(0, 0, 0)
-            pdf.cell(0, 10, f"Intervenciones en Base de Datos ({len(db_log)})")
+            title_suffix = f" de {db_total_pdf}" if db_omitted_pdf else ""
+            pdf.cell(0, 10, f"Intervenciones en Base de Datos ({len(db_log_pdf)}{title_suffix})")
             pdf.ln(12)
             pdf.set_font("Helvetica", "", 9)
             pdf.set_text_color(50, 50, 50)
             pdf.cell(0, 5, "Solo se eliminan filas con malware CRITICO CONFIRMADO.")
             pdf.ln(6)
+            if db_omitted_pdf:
+                pdf.cell(0, 5, self._safe_text(f"  {db_omitted_pdf} registros omitidos (datos insuficientes)."))
+                pdf.ln(5)
             shown_db = 0
-            for entry in db_log:
+            for entry in db_log_pdf:
                 if shown_db >= 30:
-                    pdf.cell(0, 5, self._safe_text(f"  ... y {len(db_log) - 30} entradas mas"))
+                    pdf.cell(0, 5, self._safe_text(f"  ... y {len(db_log_pdf) - 30} entradas mas"))
                     pdf.ln(5)
                     break
                 e_type = entry.get("type", "")
@@ -476,6 +587,54 @@ class ReportGenerator:
                 pdf.ln(5)
                 shown_pt += 1
 
+        # -- Archivos Residuales v2.6.0 --
+        junk_log = getattr(result, "junk_files_log", None)
+        if junk_log:
+            pdf.ln(4)
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.set_text_color(0, 0, 0)
+            pdf.cell(0, 10, f"Archivos Residuales Eliminados ({len(junk_log)})")
+            pdf.ln(12)
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(50, 50, 50)
+            shown_junk = 0
+            for entry in junk_log:
+                if shown_junk >= 30:
+                    pdf.cell(0, 5, self._safe_text(f"  ... y {len(junk_log) - 30} mas"))
+                    pdf.ln(5)
+                    break
+                action = entry.get("action", "logged_only")
+                marker = "[X]" if action in ("deleted", "quarantined") else "[i]"
+                path = entry.get("path", "?")[:80]
+                cat = entry.get("category", "")
+                pdf.cell(0, 5, self._safe_text(f"  {marker} {cat}: {path} -> {action}"))
+                pdf.ln(5)
+                shown_junk += 1
+
+        # -- Posts SPAM v2.6.0 --
+        spam_log = getattr(result, "spam_posts_log", None)
+        if spam_log:
+            pdf.ln(4)
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.set_text_color(0, 0, 0)
+            pdf.cell(0, 10, f"Posts SPAM Detectados ({len(spam_log)})")
+            pdf.ln(12)
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(50, 50, 50)
+            shown_spam = 0
+            for entry in spam_log:
+                if shown_spam >= 20:
+                    pdf.cell(0, 5, self._safe_text(f"  ... y {len(spam_log) - 20} mas"))
+                    pdf.ln(5)
+                    break
+                action = entry.get("action", "logged_only")
+                marker = "[X]" if action == "deleted" else "[?]"
+                title = entry.get("title_preview", "?")[:50]
+                score = entry.get("score", 0)
+                pdf.cell(0, 5, self._safe_text(f"  {marker} ID:{entry.get('post_id',0)} score:{score} \"{title}\" -> {action}"))
+                pdf.ln(5)
+                shown_spam += 1
+
         # -- Top hallazgos --
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 13)
@@ -489,8 +648,9 @@ class ReportGenerator:
         pdf.set_font("Helvetica", "B", 8)
         pdf.set_fill_color(230, 230, 230)
         pdf.cell(18, 6, "Riesgo", 1, fill=True)
+        pdf.cell(12, 6, "Score", 1, fill=True)
         pdf.cell(15, 6, "Tipo", 1, fill=True)
-        pdf.cell(45, 6, "Archivo", 1, fill=True)
+        pdf.cell(40, 6, "Archivo", 1, fill=True)
         pdf.cell(0, 6, "Que se encontro", 1, fill=True)
         pdf.ln(6)
 
@@ -501,18 +661,19 @@ class ReportGenerator:
             if shown >= MAX_PDF_ROWS:
                 break
             fname = Path(f.file_path).name
-            if len(fname) > 28:
-                fname = fname[:25] + "..."
+            if len(fname) > 25:
+                fname = fname[:22] + "..."
             tipo = "MALWARE" if f.confirmed_malware else "Sospec."
             desc = f.description
-            if len(desc) > 65:
-                desc = desc[:62] + "..."
+            if len(desc) > 60:
+                desc = desc[:57] + "..."
             r, g, b = colors.get(f.severity, (100, 100, 100))
             pdf.set_text_color(r, g, b)
             pdf.cell(18, 5, f.severity.upper(), 1)
             pdf.set_text_color(50, 50, 50)
+            pdf.cell(12, 5, str(getattr(f, 'confidence_score', 0)), 1)
             pdf.cell(15, 5, tipo, 1)
-            pdf.cell(45, 5, self._safe_text(fname), 1)
+            pdf.cell(40, 5, self._safe_text(fname), 1)
             pdf.cell(0, 5, self._safe_text(desc), 1)
             pdf.ln(5)
             shown += 1

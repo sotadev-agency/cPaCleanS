@@ -1,4 +1,4 @@
-"""Interfaz grafica de cPacleanS v2.3 — con log de fases, bloqueo de controles y cancelacion segura."""
+"""Interfaz grafica de cPacleanS v2.5 — scoring, cache, log de fases, bloqueo de controles y cancelacion segura."""
 import os
 import re
 import sys
@@ -26,7 +26,10 @@ from ..report.generator import ReportGenerator
 from ..core.cms_restorer import CMSRestorer
 from ..core.packager import BackupPackager
 from ..core.cms_plugin_cleaner import CMSPluginCleaner
+from ..core.cms_full_wiper import CMSFullWiper
 from ..cleaners.db_cleaner import DBCleaner
+from ..cleaners.junk_cleaner import JunkCleaner
+from ..cleaners.wordpress_cleaner import WordPressCleaner
 from ..utils.db_utils import detect_prefix_from_config, detect_prefix_from_dump
 
 SCANNER_CLASSES = [PHPScanner, DatabaseScanner, EmailScanner, CMSScanner, YaraScanner]
@@ -331,8 +334,85 @@ class CpacleanSApp(ctk.CTk):
                     self._safe_result(f"VirusTotal ({vt_mode}): {len(hits)} detecciones en {len(critical_files)} archivos")
 
             # ── FASE 4 ──
+            if is_clean:
+                self._safe_phase(4, f"Limpieza ({clean_mode})")
+                self._safe_status(f"Limpiando modo {clean_mode}...")
+                quarantine_base = str(Path(backup_path).parent)
+                cleaned = engine.clean_findings(quarantine_base, mode=clean_mode)
+                self._safe_result(f"Malware en cuarentena: {cleaned} archivos")
+
+                # Archivos 0KB
+                zero_count = engine.clean_zero_byte_files(info.extract_dir, mode=clean_mode)
+                if zero_count:
+                    self._safe_result(f"Archivos 0KB removidos: {zero_count}")
+
+                # v2.6.1: Pre-wipe WP detection (antes de borrar version.php)
+                wp_info = {}
+                if info.cms_detected and "wordpress" in info.cms_detected:
+                    self._safe_status("Pre-wipe: detectando version WP y tema activo...")
+                    wp_cleaner = WordPressCleaner(
+                        extract_dir=info.extract_dir,
+                        quarantine_dir=result.quarantine_dir or str(Path(backup_path).parent / "cuarentena"),
+                        clean_mode=clean_mode,
+                        backup_info=info,
+                        progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
+                    )
+                    wp_info = wp_cleaner.pre_wipe_detect()
+                    if wp_info.get("versions"):
+                        for rk, ver in wp_info["versions"].items():
+                            self._safe_detail(f"[WP] Version detectada: {ver}")
+                    if wp_info.get("active_themes"):
+                        for rk, theme in wp_info["active_themes"].items():
+                            self._safe_detail(f"[WP] Tema activo: {theme}")
+
+                # v2.6.0: WIPE completo de CMS antes de restaurar
+                if info.cms_detected:
+                    self._safe_status("Wipe CMS: eliminando archivos infectados...")
+                    wiper = CMSFullWiper(
+                        extract_dir=info.extract_dir,
+                        cms_detected=info.cms_detected,
+                        clean_mode=clean_mode,
+                        progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
+                    )
+                    wipe_result = wiper.wipe()
+                    result.wipe_result = wipe_result
+                    for cms_name, stats in wipe_result.items():
+                        files_rm = stats.get("files_removed", 0)
+                        dirs_rm = stats.get("dirs_removed", 0)
+                        if files_rm or dirs_rm:
+                            self._safe_result(f"[WIPER] {cms_name.upper()}: {files_rm} archivos, {dirs_rm} dirs eliminados")
+                        preserved = stats.get("preserved", [])
+                        if preserved:
+                            self._safe_detail(f"Preservados: {len(preserved)} archivos/dirs")
+
+                # v2.6.1: Post-wipe WP cleanup (core + tema + residuos)
+                if wp_info and "wordpress" in info.cms_detected:
+                    self._safe_status("Post-wipe: instalando core WP y tema activo...")
+                    wp_cleaner = WordPressCleaner(
+                        extract_dir=info.extract_dir,
+                        quarantine_dir=result.quarantine_dir or str(Path(backup_path).parent / "cuarentena"),
+                        clean_mode=clean_mode,
+                        backup_info=info,
+                        progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
+                    )
+                    wp_stats = wp_cleaner.post_wipe_clean(wp_info)
+                    # Agregar log de WP cleaner al restore log
+                    result.cms_restore_log = result.cms_restore_log or []
+                    result.cms_restore_log.extend(wp_cleaner.log)
+                    if wp_stats.get("core_installed"):
+                        self._safe_result(f"[WP] Core {wp_stats['core_version']} instalado")
+                    if wp_stats.get("theme_installed"):
+                        self._safe_result(f"[WP] Tema '{wp_stats['theme_slug']}' instalado")
+                    if wp_stats.get("cleaned_files"):
+                        self._safe_detail(f"[WP] Residuos limpiados: {wp_stats['cleaned_files']}")
+                    if wp_stats.get("cleaned_empty_dirs"):
+                        self._safe_detail(f"[WP] Carpetas vacias eliminadas: {wp_stats['cleaned_empty_dirs']}")
+                    if wp_stats.get("dirs_ensured"):
+                        self._safe_detail(f"[WP] Dirs wp-content creados: {wp_stats['dirs_ensured']}")
+
+            # ── FASE 5: Restauracion CMS (post-wipe) ──
             if self.restore_cms_var.get() and info.cms_detected and is_clean:
-                self._safe_phase(4, "Restauracion de CMS")
+                self._safe_phase(5, "Restauracion de CMS")
                 self._safe_status("Restaurando desde repositorios oficiales...")
                 restorer = CMSRestorer(info.extract_dir,
                     progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)))
@@ -346,19 +426,8 @@ class CpacleanSApp(ctk.CTk):
                         icon = "[OK]" if entry["type"] == "success" else "[X]"
                         self._safe_detail(f"{icon} {entry['message'][:90]}")
 
-            # ── FASE 5 ──
+            # ── FASE 5b: Plugins/Temas + JunkCleaner + DBCleaner ──
             if is_clean:
-                self._safe_phase(5, f"Limpieza ({clean_mode})")
-                self._safe_status(f"Limpiando modo {clean_mode}...")
-                quarantine_base = str(Path(backup_path).parent)
-                cleaned = engine.clean_findings(quarantine_base, mode=clean_mode)
-                self._safe_result(f"Malware en cuarentena: {cleaned} archivos")
-
-                # Archivos 0KB
-                zero_count = engine.clean_zero_byte_files(info.extract_dir, mode=clean_mode)
-                if zero_count:
-                    self._safe_result(f"Archivos 0KB removidos: {zero_count}")
-
                 # Detectar prefijos de BD para CMS
                 db_paths = info.structure.get("databases", [])
                 detected_prefixes = {}
@@ -382,24 +451,7 @@ class CpacleanSApp(ctk.CTk):
                                     break
                     result.db_prefixes = detected_prefixes
 
-                # Limpieza de BD (filas maliciosas, tablas protegidas)
-                if db_paths and info.cms_detected and result.quarantine_dir:
-                    self._safe_status("Limpiando base de datos...")
-                    db_cleaner = DBCleaner(
-                        extract_dir=info.extract_dir,
-                        cms_detected=info.cms_detected,
-                        prefixes=detected_prefixes,
-                        clean_mode=clean_mode,
-                        progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
-                    )
-                    db_interventions = db_cleaner.process(db_paths)
-                    result.db_interventions_log = db_interventions
-                    if db_interventions:
-                        deleted = sum(1 for i in db_interventions if "deleted" in i.get("type", "") or "removed" in i.get("type", ""))
-                        suspicious = sum(1 for i in db_interventions if i.get("type") == "suspicious")
-                        self._safe_result(f"BD: {deleted} filas eliminadas, {suspicious} sospechosas")
-
-                # Separar/eliminar plugins y temas (vector #1 de reinfeccion)
+                # Plugins/temas con filtro de reputacion v2.6.0
                 if info.cms_detected and result.quarantine_dir:
                     plugin_cleaner = CMSPluginCleaner(
                         extract_dir=info.extract_dir,
@@ -422,12 +474,57 @@ class CpacleanSApp(ctk.CTk):
                                           if e.get("reinstalled", {}).get("status") == "reinstalled")
                         not_in_repo = sum(1 for e in plugin_cleaner.removal_log
                                           if e.get("reinstalled", {}).get("status") == "not_in_repo")
+                        skipped = sum(1 for e in plugin_cleaner.removal_log
+                                      if e.get("reinstalled", {}).get("status") == "not_reinstalled")
                         if reinstalled:
                             self._safe_detail(f"Reinstalados desde repo oficial: {reinstalled}")
                         if not_in_repo:
                             self._safe_detail(f"No en repo oficial (reinstalar manual): {not_in_repo}")
+                        if skipped:
+                            self._safe_detail(f"No reinstalados (filtro reputacion): {skipped}")
                         if clean_mode != "strict":
                             self._safe_detail("Ver REINSTALAR_PLUGINS.txt en cuarentena/plugins_temas/")
+
+                # v2.6.0: JunkCleaner — archivos residuales
+                if info.cms_detected and result.quarantine_dir:
+                    self._safe_status("Limpiando archivos residuales...")
+                    junk_cleaner = JunkCleaner(
+                        extract_dir=info.extract_dir,
+                        quarantine_dir=result.quarantine_dir,
+                        clean_mode=clean_mode,
+                        progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
+                    )
+                    junk_log = junk_cleaner.process(info.cms_detected)
+                    result.junk_files_log = junk_log
+                    if junk_log:
+                        acted = sum(1 for j in junk_log if j["action"] != "logged_only")
+                        self._safe_result(f"Archivos residuales: {len(junk_log)} encontrados, {acted} procesados")
+
+                # Limpieza de BD (filas maliciosas + SPAM v2.6.0)
+                if db_paths and info.cms_detected and result.quarantine_dir:
+                    self._safe_status("Limpiando base de datos...")
+                    db_cleaner = DBCleaner(
+                        extract_dir=info.extract_dir,
+                        cms_detected=info.cms_detected,
+                        prefixes=detected_prefixes,
+                        clean_mode=clean_mode,
+                        progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
+                    )
+                    db_interventions = db_cleaner.process(db_paths)
+                    result.db_interventions_log = db_interventions
+
+                    # Separar spam posts del log general
+                    spam_posts = [i for i in db_interventions if i.get("type") == "spam_post"]
+                    result.spam_posts_log = spam_posts
+                    non_spam = [i for i in db_interventions if i.get("type") != "spam_post"]
+
+                    if non_spam:
+                        deleted = sum(1 for i in non_spam if "deleted" in i.get("type", "") or "removed" in i.get("type", ""))
+                        suspicious = sum(1 for i in non_spam if i.get("type") == "suspicious")
+                        self._safe_result(f"BD: {deleted} filas eliminadas, {suspicious} sospechosas")
+                    if spam_posts:
+                        spam_deleted = sum(1 for s in spam_posts if s.get("action") == "deleted")
+                        self._safe_result(f"Posts SPAM: {len(spam_posts)} detectados, {spam_deleted} eliminados")
 
                 self._safe_detail(f"Cuarentena: {result.quarantine_dir}")
 
@@ -493,6 +590,54 @@ class CpacleanSApp(ctk.CTk):
             self._safe_detail("Importable en WHM > Backup > Restore a Full Backup")
         except Exception as e:
             self._safe_detail(f"Error generando backup parcial: {e}")
+        self.after(0, self._finish_packaging)
+
+    def _do_package_critical_mode(self, extract_dir, backup_info, name):
+        """v2.6.0: Genera paquetes separados compatibles con cPanel Backup Restore."""
+        try:
+            packager = BackupPackager(
+                progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)))
+            output_base = str(Path(self._backup_info.path if hasattr(self._backup_info, 'path') else '').parent
+                             or Path.cwd())
+            if backup_info:
+                output_base = str(Path(backup_info.path).parent)
+
+            # Obtener SQL files del backup_info
+            sql_files = backup_info.structure.get("databases", []) if backup_info else []
+            domain = name or "sitio"
+
+            result = packager.create_critical_mode_output(
+                extract_dir, sql_files, output_base, domain)
+
+            if result.get("homedir_tar"):
+                size = round(Path(result["homedir_tar"]).stat().st_size / (1024 * 1024), 1)
+                self._safe_result(f"homedir_backup.tar.gz: {size} MB ({result['included_count']} archivos)")
+            if result.get("databases"):
+                self._safe_result(f"Bases de datos: {len(result['databases'])} archivos .sql.gz")
+            if result.get("excluded_count"):
+                self._safe_result(f"Cuarentena: {result['excluded_count']} archivos excluidos")
+
+            # Instrucciones de importacion
+            self._safe_log("")
+            self._safe_log("  PASOS PARA RESTAURAR EN CPANEL:")
+            self._safe_log("  " + "-" * 46)
+            self._safe_log("  [1] Restaurar directorio home:")
+            self._safe_log("      cPanel > Backup > Restore > Home Directory Backup")
+            self._safe_log(f"      Archivo: homedir_backup.tar.gz")
+            self._safe_log("")
+            self._safe_log("  [2] Restaurar bases de datos (una por una):")
+            self._safe_log("      cPanel > Backup > Restore > MySQL Database Backup")
+            if result.get("databases"):
+                for db_path in result["databases"]:
+                    self._safe_log(f"      - {Path(db_path).name}")
+            self._safe_log("")
+            self._safe_log("  [3] Archivos excluidos en: cuarentena/")
+
+            if self._scan_result:
+                self._scan_result.critical_output_manifest = result
+
+        except Exception as e:
+            self._safe_detail(f"Error generando paquete critico: {e}")
         self.after(0, self._finish_packaging)
 
     def _do_copy_files(self, extract_dir, dest):
@@ -655,10 +800,10 @@ class PackagingDialog(ctk.CTkToplevel):
 
     def _do_cpanel_partial(self):
         name = self._get_name() + "-critico"
-        out_path = Path(self.backup_path).parent / f"{name}.tar.gz"
         self.destroy()
-        threading.Thread(target=self.parent_app._do_package_cpanel_partial,
-                         args=(self.extract_dir, self.backup_info, out_path),
+        # v2.6.0: Usar create_critical_mode_output para paquetes compatibles cPanel
+        threading.Thread(target=self.parent_app._do_package_critical_mode,
+                         args=(self.extract_dir, self.backup_info, name),
                          daemon=True).start()
 
     def _do_copy(self):
@@ -680,7 +825,7 @@ class SettingsWindow(ctk.CTkToplevel):
         super().__init__(parent)
         self.config = config
         self.title("Configuracion cPacleanS")
-        self.geometry("560x560")
+        self.geometry("560x780")
         self.transient(parent)
         self.grab_set()
         self._build()
@@ -748,6 +893,48 @@ class SettingsWindow(ctk.CTkToplevel):
         self.workers_label.pack(padx=16, anchor="w", pady=(0, 8))
         self.workers_slider.configure(command=lambda v: self.workers_label.configure(text=f"{int(v)} workers"))
 
+        # ── Scoring ──
+        ctk.CTkLabel(frame, text="Scoring:", anchor="w",
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(padx=16, anchor="w", pady=(6, 0))
+        ctk.CTkLabel(frame, text="Threshold de confirmacion (score >= threshold = malware confirmado):",
+                     font=ctk.CTkFont(size=10)).pack(padx=16, anchor="w")
+        self.threshold_slider = ctk.CTkSlider(frame, from_=20, to=95, number_of_steps=15, width=300)
+        self.threshold_slider.pack(padx=16, anchor="w", pady=(0, 2))
+        self.threshold_slider.set(self.config.get("confidence_threshold", 70))
+        self.threshold_label = ctk.CTkLabel(frame,
+            text=f"Threshold: {int(self.threshold_slider.get())}  (>=70 estricto, >=50 permisivo)",
+            font=ctk.CTkFont(size=10), text_color="#8892b0")
+        self.threshold_label.pack(padx=16, anchor="w", pady=(0, 8))
+        self.threshold_slider.configure(
+            command=lambda v: self.threshold_label.configure(
+                text=f"Threshold: {int(v)}  (>=70 estricto, >=50 permisivo)"))
+
+        # ── Filtrado ──
+        ctk.CTkLabel(frame, text="Filtrado:", anchor="w",
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(padx=16, anchor="w", pady=(6, 0))
+        ctk.CTkLabel(frame, text="Directorios excluidos del escaneo (separados por coma):",
+                     font=ctk.CTkFont(size=10)).pack(padx=16, anchor="w")
+        self.excluded_entry = ctk.CTkEntry(frame, width=460,
+                     placeholder_text="vendor, node_modules, .git, tests, test, phpunit")
+        self.excluded_entry.pack(padx=16, anchor="w", pady=(0, 8))
+        current_excluded = ", ".join(self.config.get("excluded_dirs", []))
+        if current_excluded:
+            self.excluded_entry.insert(0, current_excluded)
+
+        # ── Cache ──
+        ctk.CTkLabel(frame, text="Cache de escaneo:", anchor="w",
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(padx=16, anchor="w", pady=(6, 0))
+        cache_row = ctk.CTkFrame(frame, fg_color="transparent")
+        cache_row.pack(padx=16, anchor="w", pady=(0, 8))
+        self.cache_stats_label = ctk.CTkLabel(cache_row, text="Cargando...",
+                     font=ctk.CTkFont(size=10), text_color="#8892b0")
+        self.cache_stats_label.pack(side="left", padx=(0, 12))
+        ctk.CTkButton(cache_row, text="Limpiar cache", width=110,
+                      command=self._clear_cache,
+                      fg_color="#cc3300", hover_color="#ff4400",
+                      font=ctk.CTkFont(size=10)).pack(side="left")
+        self._refresh_cache_stats()
+
         # ── CMS ──
         ctk.CTkLabel(frame, text="CMS:", anchor="w",
                      font=ctk.CTkFont(size=12, weight="bold")).pack(padx=16, anchor="w", pady=(6, 0))
@@ -806,6 +993,26 @@ class SettingsWindow(ctk.CTkToplevel):
         except ValueError:
             pass
         self.config["scan_workers"] = int(self.workers_slider.get())
+        self.config["confidence_threshold"] = int(self.threshold_slider.get())
+        excluded_raw = self.excluded_entry.get().strip()
+        self.config["excluded_dirs"] = [d.strip() for d in excluded_raw.split(",") if d.strip()] if excluded_raw else []
         self.config["restore_cms_core"] = self.restore_var.get()
         save_config(self.config)
         self.destroy()
+
+    def _refresh_cache_stats(self):
+        try:
+            from ..utils.hash_cache import HashCache
+            stats = HashCache().stats()
+            self.cache_stats_label.configure(
+                text=f"{stats['count']} archivos en cache, {stats['size_mb']} MB")
+        except Exception:
+            self.cache_stats_label.configure(text="Cache no disponible")
+
+    def _clear_cache(self):
+        try:
+            from ..utils.hash_cache import HashCache
+            HashCache().clear()
+            self._refresh_cache_stats()
+        except Exception:
+            pass

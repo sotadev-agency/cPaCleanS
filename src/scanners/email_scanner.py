@@ -4,6 +4,7 @@ import email
 import email.policy
 from pathlib import Path
 from ..core.engine import Finding
+from ..config.settings import TRUSTED_EMAIL_DOMAINS
 
 EMAIL_PATTERNS = [
     # Phishing
@@ -104,15 +105,31 @@ class EmailScanner:
         return findings
 
     def _scan_email_content(self, file_path, content, findings):
+        from_match = re.search(r'^From:\s*(.+)', content, re.MULTILINE | re.IGNORECASE)
+        from_domain = self._extract_domain(from_match.group(1)) if from_match else ""
+        is_trusted = from_domain in TRUSTED_EMAIL_DOMAINS if from_domain else False
+
         lines = content.split("\n")
+        phishing_findings = []
         for compiled, sev, cat, desc in self._email_compiled:
             for line_num, line in enumerate(lines, 1):
                 if compiled.search(line):
-                    findings.append(Finding(
+                    f = Finding(
                         file_path=file_path, line_number=line_num,
                         severity=sev, category=cat, description=desc,
                         context=line.strip()[:200],
-                    ))
+                    )
+                    if cat == "phishing":
+                        phishing_findings.append(f)
+                    else:
+                        findings.append(f)
+
+        if phishing_findings:
+            distinct = len({f.description for f in phishing_findings})
+            if is_trusted and distinct < 2:
+                pass
+            else:
+                findings.extend(phishing_findings)
 
     def _scan_reinfection_code(self, file_path, content, findings):
         lines = content.split("\n")

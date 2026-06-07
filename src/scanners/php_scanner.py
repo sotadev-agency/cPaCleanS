@@ -3,6 +3,9 @@ import re
 import os
 from pathlib import Path
 from ..core.engine import Finding
+from ..config.settings import (
+    WP_TRUSTED_SLUGS, WP_WHITELIST_HASHES, CACHE_HTACCESS_SIGNATURES,
+)
 
 # Patrones PHP maliciosos (severidad, categoría, regex, descripción)
 PHP_PATTERNS = [
@@ -79,10 +82,27 @@ FAST_KEYWORDS_HTACCESS = {
 class PHPScanner:
     name = "PHP/Web Scanner"
 
+    @staticmethod
+    def _build_batch(patterns):
+        """Agrupa patrones por categoria en un solo regex combinado con alternacion."""
+        groups = {}
+        for sev, cat, pattern, desc in patterns:
+            groups.setdefault(cat, []).append((sev, pattern, desc))
+        return [
+            (cat, re.compile("|".join(f"(?:{p})" for _, p, _ in items), re.IGNORECASE), items)
+            for cat, items in groups.items()
+        ]
+
     def __init__(self):
         self._compiled = {}
         for sev, cat, pattern, desc in PHP_PATTERNS + JS_PATTERNS + HTACCESS_PATTERNS:
             self._compiled[pattern] = (re.compile(pattern, re.IGNORECASE), sev, cat, desc)
+
+        self._batch_php = self._build_batch(PHP_PATTERNS)
+        self._batch_js = self._build_batch(JS_PATTERNS)
+        self._batch_htaccess = self._build_batch(HTACCESS_PATTERNS)
+        self._batch_html = self._build_batch(PHP_PATTERNS + JS_PATTERNS)
+        self._batch_css = self._batch_js
 
     def scan(self, file_path: str) -> list:
         fp = Path(file_path)
@@ -90,19 +110,19 @@ class PHPScanner:
         name = fp.name.lower()
 
         if ext in (".php", ".php5", ".php7", ".phtml", ".phar"):
-            patterns = PHP_PATTERNS
+            batch = self._batch_php
             fast_kw = FAST_KEYWORDS_PHP
         elif ext in (".js",):
-            patterns = JS_PATTERNS
+            batch = self._batch_js
             fast_kw = FAST_KEYWORDS_JS
         elif ext in (".html", ".htm"):
-            patterns = PHP_PATTERNS + JS_PATTERNS
+            batch = self._batch_html
             fast_kw = FAST_KEYWORDS_PHP | FAST_KEYWORDS_JS
         elif name == ".htaccess":
-            patterns = HTACCESS_PATTERNS
+            batch = self._batch_htaccess
             fast_kw = FAST_KEYWORDS_HTACCESS
         elif ext in (".css", ".svg"):
-            patterns = JS_PATTERNS
+            batch = self._batch_css
             fast_kw = FAST_KEYWORDS_JS
         else:
             return []
@@ -129,22 +149,64 @@ class PHPScanner:
         findings = []
         lines = content.split("\n")
 
-        for sev, cat, pattern, desc in patterns:
-            compiled, _, _, _ = self._compiled[pattern]
-            for line_num, line in enumerate(lines, 1):
-                if compiled.search(line):
-                    ctx = line.strip()[:200]
-                    findings.append(Finding(
-                        file_path=file_path,
-                        line_number=line_num,
-                        severity=sev,
-                        category=cat,
-                        description=desc,
-                        matched_pattern=pattern[:80],
-                        context=ctx,
-                    ))
+        for line_num, line in enumerate(lines, 1):
+            for cat, batch_re, items in batch:
+                if batch_re.search(line):
+                    for sev, pattern, desc in items:
+                        if self._compiled[pattern][0].search(line):
+                            ctx = line.strip()[:200]
+                            findings.append(Finding(
+                                file_path=file_path,
+                                line_number=line_num,
+                                severity=sev,
+                                category=cat,
+                                description=desc,
+                                matched_pattern=pattern[:80],
+                                context=ctx,
+                            ))
 
         self._check_suspicious_filenames(file_path, findings)
+        if findings:
+            findings = self._apply_whitelist(file_path, name, content_lower, findings)
+        return findings
+
+    CONFIRMED_MALWARE_CATS = {"webshell", "backdoor", "cryptominer", "dropper"}
+
+    def _apply_whitelist(self, file_path, name, content_lower, findings):
+        """Reduce falsos positivos via hash whitelist, slugs confiables y firmas de cache."""
+        import hashlib as _hashlib
+
+        if WP_WHITELIST_HASHES:
+            try:
+                sha = _hashlib.sha256()
+                with open(file_path, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(65536), b""):
+                        sha.update(chunk)
+                if sha.hexdigest() in WP_WHITELIST_HASHES:
+                    return []
+            except (OSError, PermissionError):
+                pass
+
+        if name == ".htaccess":
+            if any(sig.lower() in content_lower for sig in CACHE_HTACCESS_SIGNATURES):
+                for f in findings:
+                    f.severity = "info"
+                    f.description = f"Cache plugin htaccess - {f.description}"
+                return findings
+
+        fp_norm = file_path.replace("\\", "/").lower()
+        for segment in ("plugins", "themes"):
+            marker = f"/wp-content/{segment}/"
+            idx = fp_norm.find(marker)
+            if idx >= 0:
+                slug = fp_norm[idx + len(marker):].split("/")[0]
+                if slug in WP_TRUSTED_SLUGS:
+                    for f in findings:
+                        if f.category not in self.CONFIRMED_MALWARE_CATS:
+                            f.severity = "info"
+                            f.description = f"[Plugin/tema confiable] {f.description}"
+                    break
+
         return findings
 
     SAFE_DIRS = {

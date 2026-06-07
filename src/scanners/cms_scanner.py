@@ -4,6 +4,7 @@ import os
 import hashlib
 from pathlib import Path
 from ..core.engine import Finding
+from ..config.settings import CACHE_HTACCESS_SIGNATURES
 
 
 CMS_CHECKS = {
@@ -217,11 +218,15 @@ class CMSScanner:
             try:
                 content = fp.read_text(encoding="utf-8", errors="replace")
                 if re.search(r"AddHandler|SetHandler.*php|php_value", content, re.IGNORECASE):
+                    content_lower = content.lower()
+                    is_cache = any(sig.lower() in content_lower for sig in CACHE_HTACCESS_SIGNATURES)
                     findings.append(Finding(
                         file_path=str(fp),
-                        severity="critical",
+                        severity="info" if is_cache else "critical",
                         category="cms_htaccess_override",
-                        description=f"[{cms_name.upper()}] .htaccess malicioso en uploads habilitando PHP",
+                        description=(f"[{cms_name.upper()}] Cache plugin htaccess - no malicioso"
+                                     if is_cache else
+                                     f"[{cms_name.upper()}] .htaccess malicioso en uploads habilitando PHP"),
                         context=content[:200],
                     ))
             except (OSError, PermissionError):

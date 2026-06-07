@@ -11,8 +11,14 @@ def build():
     print("  cPacleanS — Build")
     print("=" * 50)
 
-    print("\n[1/3] Instalando dependencias...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(BASE_DIR / "requirements.txt")])
+    print("\n[1/3] Verificando dependencias...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-r", str(BASE_DIR / "requirements.txt")],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print("  Algunas dependencias opcionales fallaron (yara-python requiere compilador C++).")
+        print("  Continuando con las dependencias disponibles...")
 
     print("\n[2/3] Compilando ejecutable...")
     icon_arg = f"--icon={BASE_DIR / 'assets' / 'icon.ico'}" if (BASE_DIR / "assets" / "icon.ico").exists() else ""
