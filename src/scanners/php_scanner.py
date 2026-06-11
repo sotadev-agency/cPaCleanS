@@ -38,13 +38,41 @@ PHP_PATTERNS = [
     ("medium", "suspicious", r'\bmail\s*\(\s*\$_(GET|POST|REQUEST)', "Envío de mail con input del usuario (spam relay)"),
     ("low", "suspicious", r'@(eval|assert|system|exec|passthru)', "Función peligrosa con supresión de errores"),
     ("low", "suspicious", r'(curl_exec|file_get_contents)\s*\(\s*["\']https?://', "Petición HTTP saliente hardcoded"),
+
+    # v2.6.5: Mailer backdoors — SPAM/phishing/mailing masivo
+    ("critical", "mailer_backdoor", r'\$(?:mail|phpmailer|mailer)\s*->\s*(?:Password|Username)\s*=\s*["\'][^"\']{4,}["\']', "PHPMailer con credenciales SMTP hardcodeadas"),
+    ("critical", "mailer_backdoor", r'\bmail\s*\([^)]*(?:Bcc|Cc)\s*:[^)]*@[^)]*\)', "Función mail() con header Bcc/Cc (mailing masivo)"),
+    ("critical", "mailer_backdoor", r'(?:From|Reply-To|Bcc|X-Mailer)\s*:[^\r\n]*(?:[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})', "Header de email embebido en código PHP (spam relay)"),
+    ("critical", "mailer_backdoor", r'foreach\s*\(\s*\$\w+\s+as\s+[^\)]+\)\s*\{[^}]*\bmail\s*\(', "Bucle de envío masivo: mail() dentro de foreach"),
+    ("high", "mailer_backdoor", r'\$\w+\s*=\s*(?:array\s*\(|\[)\s*(?:["\'][a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}["\'][\s,]){2,}', "Lista de destinatarios de email embebida en código"),
+    ("high", "mailer_backdoor", r'(?:SMTPAuth|SMTPSecure|Host)\s*=\s*(?:true|["\']).*(?:Password|Username)\s*=\s*["\'][^"\']{4,}["\']', "Configuración SMTP completa hardcodeada (phishing)"),
+    ("high", "mailer_backdoor", r'(?:base64_decode|gzinflate|str_rot13)\s*\([^)]+\)[^;]*\bmail\s*\(', "Llamada a mail() precedida de ofuscación"),
+    ("high", "mailer_backdoor", r'X-(?:Spam|Priority|Mailer)\s*:\s*\S+', "Headers anti-spam hardcodeados (evasión de filtros)"),
+    ("medium", "mailer_backdoor", r'\bswiftmailer\b|\bSwift_Message\b', "SwiftMailer embebido (posible mailing masivo)"),
+    ("medium", "mailer_backdoor", r'(?:smtp_host|smtp_pass|smtp_user)\s*=\s*["\'][^"\']{4,}["\']', "Configuración SMTP hardcodeada en variable"),
+
+    # v3.0.0: Técnicas de ofuscación avanzada y evasión
+    ("critical", "backdoor", r'\bhex2bin\s*\(\s*["\'][0-9a-fA-F]{40,}["\']', "hex2bin con blob hex largo (ofuscación moderna)"),
+    ("critical", "backdoor", r'\binclude(?:_once)?\s*\(\s*\$_(GET|POST|REQUEST|COOKIE|SERVER)', "include() con path controlado por usuario (RFI/LFI)"),
+    ("critical", "backdoor", r'\brequire(?:_once)?\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)', "require() con path controlado por usuario (LFI)"),
+    ("critical", "webshell", r'\bfsockopen\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)', "fsockopen con host del usuario (C2 connection)"),
+    ("critical", "backdoor", r'\bpcntl_exec\s*\(', "pcntl_exec detectado (ejecución de proceso nativo)"),
+    ("high", "obfuscation", r'\barray_map\s*\(\s*["\'](?:assert|eval|system|exec|passthru|shell_exec)["\']', "array_map con función peligrosa como callback"),
+    ("high", "obfuscation", r'\busort\s*\(\s*\$\w+\s*,\s*["\'](?:assert|system|exec)["\']', "usort con función peligrosa como comparador"),
+    ("high", "injection", r'\bunserialize\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)', "unserialize() con input de usuario (PHP Object Injection)"),
+    ("high", "obfuscation", r'\bstr_split\s*\([^)]+\)\s*[;,\s]*\$\w+\s*=\s*implode\s*\(', "str_split+implode para construir string encadenado (evasión de regex)"),
+    ("high", "obfuscation", r'\bob_start\s*\([^)]*\)\s*;[^;]*(?:eval|assert|system)\s*\(', "ob_start + eval/system (output buffer capture evasión)"),
+    ("high", "backdoor", r'\bregister_shutdown_function\s*\(\s*["\'](?:system|exec|passthru|shell_exec)["\']', "register_shutdown_function con función peligrosa"),
+    ("high", "obfuscation", r'\bReflectionFunction\s*\(\s*\$\w+\s*\)\s*->\s*invoke\s*\(', "ReflectionFunction->invoke() para ejecutar función ofuscada"),
+    ("medium", "suspicious", r'\bfsockopen\s*\(\s*["\'](?:tcp|ssl)://', "fsockopen con protocolo explícito (conexión de red saliente)"),
+    ("medium", "backdoor", r'\bset_error_handler\s*\(\s*(?:create_function|["\']eval)["\']', "set_error_handler con función peligrosa (evasión AV)"),
 ]
 
 JS_PATTERNS = [
     ("critical", "js_malware", r'document\.write\s*\(\s*unescape\s*\(', "document.write con unescape (inyección clásica)"),
     ("critical", "js_malware", r'eval\s*\(\s*(atob|unescape|decodeURIComponent)\s*\(', "Eval con decodificación (dropper JS)"),
     ("high", "js_malware", r'String\.fromCharCode\s*\(\s*(\d+\s*,\s*){20,}', "String.fromCharCode masivo (ofuscación)"),
-    ("high", "js_injection", r'<script[^>]*src\s*=\s*["\']https?://(?!.*(?:googleapis|gstatic|cloudflare|jsdelivr|unpkg|cdnjs))', "Script externo de dominio no confiable"),
+    ("high", "js_injection", r'<script[^>]*src\s*=\s*["\']https?://(?!.*(?:googleapis|gstatic|cloudflare|jsdelivr|unpkg|cdnjs|bootstrapcdn|jquery|fastly|akamai|stackpath|azureedge|cloudfront|amazonaws|fontawesome|shopify|wordpress\.com|wp\.com|gravatar))', "Script externo de dominio no confiable"),
     ("medium", "js_suspicious", r'new\s+Function\s*\(\s*["\']', "new Function con string (eval implícito)"),
     ("medium", "js_crypto", r'(CoinHive|coinhive|cryptonight|minero?\b)', "Cripto-minero detectado"),
 ]
@@ -65,6 +93,15 @@ FAST_KEYWORDS_PHP = {
     "FilesMan", "c99", "r57", "WSO", "b374k", "alfa",
     "file_get_contents", "file_put_contents", "mail(", "dl(",
     "ini_set", "curl_exec",
+    # v2.6.5: mailer backdoor keywords
+    "PHPMailer", "phpmailer", "SwiftMailer", "smtp_pass", "smtp_host",
+    "SMTPAuth", "SMTPSecure", "X-Mailer", "X-Spam", "X-Priority",
+    "Bcc:", "Reply-To:",
+    # v3.0.0: técnicas avanzadas
+    "hex2bin", "include(", "include_once", "require(", "require_once",
+    "fsockopen", "pcntl_exec", "array_map", "usort", "unserialize",
+    "str_split", "ob_start", "register_shutdown_function",
+    "ReflectionFunction", "set_error_handler",
 }
 
 FAST_KEYWORDS_JS = {
@@ -77,6 +114,50 @@ FAST_KEYWORDS_HTACCESS = {
     "RewriteRule", "AddHandler", "php_value", "SetHandler",
     "auto_prepend", "auto_append",
 }
+
+# ── v2.6.2: Detector de archivos PHP sin codigo ejecutable (Mejora #1) ──
+_PHP_BLOCK_COMMENT_RE = re.compile(r'/\*.*?\*/', re.DOTALL)
+# Tag solo: <?php o <? (sin nada mas)
+_PHP_OPEN_TAG_ONLY_RE = re.compile(r'^\s*<\?(?:php)?\s*$', re.IGNORECASE)
+# Tag solo: ?>
+_PHP_CLOSE_TAG_RE = re.compile(r'^\s*\?>\s*$')
+# Tag combinado vacio: <?php ?> o <? ?>
+_PHP_EMPTY_TAGS_RE = re.compile(r'^\s*<\?(?:php)?\s*\?>\s*$', re.IGNORECASE)
+_PHP_COMMENT_LINE_RE = re.compile(r'^\s*(?://|#)')
+
+
+def is_php_functional(content: str) -> bool:
+    """True si el archivo PHP tiene al menos 1 linea de codigo ejecutable real.
+
+    Un archivo NO es funcional si todo su contenido son:
+    - Lineas en blanco (whitespace)
+    - Tags PHP solos: <?php, <?, ?>
+    - Comentarios de linea: // ... o # ...
+    - Bloques de comentario: /* ... */
+
+    Ejemplos NO funcionales: 'silence is golden', index.php vacio, <?php ?>,
+    archivos con solo comentarios de documentacion.
+
+    Ejemplos SI funcionales: cualquier funcion, clase, asignacion, llamada,
+    include, require, echo, eval, etc.
+    """
+    # Eliminar bloques de comentario /* ... */ antes de analizar lineas
+    cleaned = _PHP_BLOCK_COMMENT_RE.sub('', content)
+    for line in cleaned.split('\n'):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _PHP_EMPTY_TAGS_RE.match(stripped):
+            continue
+        if _PHP_OPEN_TAG_ONLY_RE.match(stripped):
+            continue
+        if _PHP_CLOSE_TAG_RE.match(stripped):
+            continue
+        if _PHP_COMMENT_LINE_RE.match(stripped):
+            continue
+        # Esta linea no es ni whitespace, ni tag, ni comentario → es ejecutable
+        return True
+    return False
 
 
 class PHPScanner:
@@ -139,6 +220,13 @@ class PHPScanner:
                 content = f.read()
         except (OSError, PermissionError, UnicodeDecodeError):
             return []
+
+        # v2.6.2: Archivos PHP sin codigo ejecutable no generan findings del scanner.
+        # Son stubs tipo "silence is golden" (creados por WP y plugins para bloquear
+        # listado de directorios). No pueden contener codigo malicioso operativo.
+        if ext in (".php", ".php5", ".php7", ".phtml", ".phar"):
+            if not is_php_functional(content):
+                return []
 
         content_lower = content.lower()
         if not any(kw.lower() in content_lower for kw in fast_kw):
@@ -223,10 +311,17 @@ class PHPScanner:
     def _check_suspicious_filenames(self, file_path: str, findings: list):
         name = Path(file_path).name.lower()
 
-        always_suspicious = ["c99.php", "r57.php", "b374k.php", "wso.php", "alfa.php"]
+        always_suspicious = [
+            "c99.php", "r57.php", "b374k.php", "wso.php", "alfa.php",
+            "indoxploit.php", "priv8.php", "madshell.php", "cgitelnet.php",
+            "wshell.php", "symlink.php", "cpanel.php", "cpanel_backup.php",
+            "decode.php", "encoder.php", "locus7shell.php", "whmcs_exploit.php",
+        ]
         context_suspicious = [
             "shell.php", "cmd.php", "mini.php", "bypass.php",
             "uploader.php", "filemanager.php", "adminer.php",
+            "config.bak.php", "install.php", "setup.php",
+            "test.php", "debug.php", "info.php", "phpinfo.php",
         ]
 
         if name in always_suspicious:

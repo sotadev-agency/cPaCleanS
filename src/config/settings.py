@@ -5,7 +5,7 @@ import multiprocessing
 from pathlib import Path
 
 APP_NAME = "cPacleanS"
-APP_VERSION = "2.6.1"
+APP_VERSION = "3.0.0"
 
 # Directorios de cPanel que WHM necesita para restaurar dominios correctamente.
 # Nunca deben ser cuarentenados aunque contengan patrones sospechosos.
@@ -48,8 +48,10 @@ CMS_PROTECTED_TABLES = {
 }
 
 # Marcadores para validar deteccion de CMS (requiere AMBOS: archivo + directorio)
+# v3.0.0: WordPress acepta wp-content como dir marker (wp-includes se borra en el
+# wipe; usar wp-content garantiza deteccion post-wipe igual que pre-wipe).
 CMS_DETECTION_MARKERS = {
-    "wordpress": {"file": "wp-config.php", "dir": "wp-includes"},
+    "wordpress": {"file": "wp-config.php", "dir": "wp-content"},
     "joomla":    {"file": "configuration.php", "dir": "administrator"},
     "moodle":    {"file": "config.php", "dir": "lib", "extra_file": "lib/moodlelib.php"},
     "ojs":       {"file": "config.inc.php", "dir": "lib", "extra_dir": "lib/pkp"},
@@ -93,12 +95,25 @@ WP_TRUSTED_SLUGS = frozenset({
     # Core utilities
     "jetpack", "akismet", "really-simple-ssl",
     "classic-editor", "gutenberg",
-    "advanced-custom-fields", "duplicate-post",
-    "regenerate-thumbnails", "tablepress",
+    "advanced-custom-fields", "acf-pro",
+    "duplicate-post", "regenerate-thumbnails", "tablepress",
     "tinymce-advanced", "redirection",
     # Media
     "wp-smushit", "imagify", "shortpixel-image-optimiser",
     "ewww-image-optimizer",
+    # Multilingue
+    "polylang", "wpml-multilingual-cms", "translatepress-multilingual",
+    # Mantenimiento y optimizacion
+    "wp-optimize", "wp-dbmanager", "query-monitor",
+    "user-switching", "wp-debugging", "health-check",
+    # WooCommerce addons
+    "woocommerce-subscriptions", "woocommerce-memberships",
+    "woocommerce-product-bundles", "woocommerce-bookings",
+    # Membership / Restriccion
+    "restrict-content-pro", "memberpress", "paid-memberships-pro",
+    # Social / Marketing
+    "monarch", "bloom", "social-warfare",
+    "mailpoet", "fluentcrm",
 })
 
 # Hashes SHA256 de archivos core de plugins/temas WP conocidos.
@@ -147,6 +162,21 @@ SPAM_KEYWORDS = {
     "adult": [
         "xxx", "porn", "nude", "escort", "cam girl", "adult dating",
         "sexo", "videos adultos",
+    ],
+    "investment_scam": [
+        "guaranteed profit", "investment returns", "passive income guaranteed",
+        "double your money", "100% return", "free crypto", "airdrop",
+        "nft giveaway", "binary options", "forex signals", "pump and dump",
+    ],
+    "tech_support_scam": [
+        "your computer is infected", "call microsoft", "windows support",
+        "virus detected call", "your account has been hacked", "urgent security alert",
+        "technical support number", "0800 virus",
+    ],
+    "phishing": [
+        "verify your account", "confirm your credentials", "update your billing",
+        "account suspended", "unusual activity", "click here to restore",
+        "your paypal", "your account will be closed", "login to claim",
     ],
 }
 

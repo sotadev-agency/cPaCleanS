@@ -1,8 +1,9 @@
-"""Interfaz grafica de cPacleanS v2.5 — scoring, cache, log de fases, bloqueo de controles y cancelacion segura."""
+"""Interfaz grafica de cPacleanS v2.6.6 — scoring, cache, log de fases, bloqueo de controles y cancelacion segura."""
 import os
 import re
 import sys
 import threading
+import traceback
 import webbrowser
 import multiprocessing
 from pathlib import Path
@@ -289,6 +290,21 @@ class CpacleanSApp(ctk.CTk):
             self._engine = engine
             for cls in SCANNER_CLASSES:
                 engine.register_scanner_class(cls)
+
+            # v2.6.2: Pre-scan — configurar cuarentena y aislar backups ANTES de escanear.
+            # Backups (softaculous_backups, UpdraftPlus, Duplicator, etc.) se mueven a
+            # quarantine/backups/ para que el scanner no los procese como amenazas.
+            if is_clean:
+                engine.pre_scan_quarantine_setup(str(Path(backup_path).parent))
+                backup_log = engine.isolate_backups_pre_scan(info.extract_dir)
+                if backup_log:
+                    self._safe_result(
+                        f"[BACKUP] {len(backup_log)} elemento(s) de backup aislados pre-escaneo")
+                    for b in backup_log[:5]:
+                        self._safe_detail(f"  {b['name']} ({b['type']})")
+                    if len(backup_log) > 5:
+                        self._safe_detail(f"  ... y {len(backup_log) - 5} mas")
+
             result = engine.scan_directory(info.extract_dir, backup_info=info, critical_only=critical_only)
             self._scan_result = result
 
@@ -336,36 +352,61 @@ class CpacleanSApp(ctk.CTk):
             # ── FASE 4 ──
             if is_clean:
                 self._safe_phase(4, f"Limpieza ({clean_mode})")
-                self._safe_status(f"Limpiando modo {clean_mode}...")
                 quarantine_base = str(Path(backup_path).parent)
-                cleaned = engine.clean_findings(quarantine_base, mode=clean_mode)
-                self._safe_result(f"Malware en cuarentena: {cleaned} archivos")
 
-                # Archivos 0KB
-                zero_count = engine.clean_zero_byte_files(info.extract_dir, mode=clean_mode)
-                if zero_count:
-                    self._safe_result(f"Archivos 0KB removidos: {zero_count}")
-
-                # v2.6.1: Pre-wipe WP detection (antes de borrar version.php)
+                # v2.6.6: Pre-wipe SOLO detecta la version WP (version.php se borra
+                # en el wipe). La identificacion de tema/plugins activos se movio a
+                # la fase 5; la reinstalacion es exclusiva de la fase 5.
                 wp_info = {}
+                wp_cleaner_ref = None
                 if info.cms_detected and "wordpress" in info.cms_detected:
-                    self._safe_status("Pre-wipe: detectando version WP y tema activo...")
-                    wp_cleaner = WordPressCleaner(
+                    self._safe_status("Pre-wipe: detectando version WP...")
+                    wp_cleaner_ref = WordPressCleaner(
                         extract_dir=info.extract_dir,
                         quarantine_dir=result.quarantine_dir or str(Path(backup_path).parent / "cuarentena"),
                         clean_mode=clean_mode,
                         backup_info=info,
                         progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
                     )
-                    wp_info = wp_cleaner.pre_wipe_detect()
+                    wp_info = wp_cleaner_ref.pre_wipe_detect()
+                    # v2.6.6: guardar versiones para consumirlas en fase 5
+                    result.wp_versions_prewipe = dict(wp_info.get("versions", {}))
                     if wp_info.get("versions"):
                         for rk, ver in wp_info["versions"].items():
-                            self._safe_detail(f"[WP] Version detectada: {ver}")
-                    if wp_info.get("active_themes"):
-                        for rk, theme in wp_info["active_themes"].items():
-                            self._safe_detail(f"[WP] Tema activo: {theme}")
+                            self._safe_detail(f"[WP] Version: {ver}")
 
-                # v2.6.0: WIPE completo de CMS antes de restaurar
+                # a) Limpiar archivos de malware
+                self._safe_status(f"Limpiando modo {clean_mode}...")
+                cleaned = engine.clean_findings(quarantine_base, mode=clean_mode)
+                self._safe_result(f"Malware en cuarentena: {cleaned} archivos")
+
+                zero_count = engine.clean_zero_byte_files(info.extract_dir, mode=clean_mode)
+                if zero_count:
+                    self._safe_result(f"Archivos 0KB removidos: {zero_count}")
+
+                # b) v2.6.3: Mover plugins/temas a cms_components/ ANTES del wipe
+                if wp_info and "wordpress" in info.cms_detected:
+                    self._safe_status("Pre-wipe: moviendo plugins y temas a cuarentena...")
+                    sep_log = wp_cleaner_ref.pre_wipe_separate_addons()
+                    if sep_log:
+                        plugins_sep = sum(1 for e in sep_log if e["addon_type"] == "plugin")
+                        themes_sep = sum(1 for e in sep_log if e["addon_type"] == "theme")
+                        self._safe_result(
+                            f"[WP] Separados pre-wipe: {plugins_sep} plugins, {themes_sep} temas")
+                        # Guardar en plugins_temas_log para el reporte
+                        result.plugins_temas_log = result.plugins_temas_log or []
+                        for e in sep_log:
+                            result.plugins_temas_log.append({
+                                "cms": "wordpress",
+                                "type": e["addon_type"],
+                                "name": e["slug"],
+                                "version": e["version"],
+                                "is_active": False,
+                                "action": "cuarentena",
+                                "reinstalled": None,
+                            })
+
+                # c) WIPE completo de CMS
                 if info.cms_detected:
                     self._safe_status("Wipe CMS: eliminando archivos infectados...")
                     wiper = CMSFullWiper(
@@ -376,46 +417,47 @@ class CpacleanSApp(ctk.CTk):
                     )
                     wipe_result = wiper.wipe()
                     result.wipe_result = wipe_result
-                    for cms_name, stats in wipe_result.items():
-                        files_rm = stats.get("files_removed", 0)
-                        dirs_rm = stats.get("dirs_removed", 0)
+                    for cms_name, wstats in wipe_result.items():
+                        files_rm = wstats.get("files_removed", 0)
+                        dirs_rm = wstats.get("dirs_removed", 0)
                         if files_rm or dirs_rm:
-                            self._safe_result(f"[WIPER] {cms_name.upper()}: {files_rm} archivos, {dirs_rm} dirs eliminados")
-                        preserved = stats.get("preserved", [])
+                            self._safe_result(
+                                f"[WIPER] {cms_name.upper()}: {files_rm} archivos, {dirs_rm} dirs eliminados")
+                        preserved = wstats.get("preserved", [])
                         if preserved:
                             self._safe_detail(f"Preservados: {len(preserved)} archivos/dirs")
 
-                # v2.6.1: Post-wipe WP cleanup (core + tema + residuos)
+                # d) v2.6.6: Post-wipe SOLO LIMPIEZA (do_install=False) — garantiza
+                # dirs wp-content y elimina residuos. La instalacion de core, plugins
+                # y tema es exclusiva de la fase 5.
                 if wp_info and "wordpress" in info.cms_detected:
-                    self._safe_status("Post-wipe: instalando core WP y tema activo...")
-                    wp_cleaner = WordPressCleaner(
+                    self._safe_status("Post-wipe: limpiando residuos de wp-content...")
+                    wp_cleaner2 = WordPressCleaner(
                         extract_dir=info.extract_dir,
                         quarantine_dir=result.quarantine_dir or str(Path(backup_path).parent / "cuarentena"),
                         clean_mode=clean_mode,
                         backup_info=info,
                         progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
                     )
-                    wp_stats = wp_cleaner.post_wipe_clean(wp_info)
-                    # Agregar log de WP cleaner al restore log
+                    wp_stats = wp_cleaner2.post_wipe_clean(wp_info, do_install=False)
                     result.cms_restore_log = result.cms_restore_log or []
-                    result.cms_restore_log.extend(wp_cleaner.log)
-                    if wp_stats.get("core_installed"):
-                        self._safe_result(f"[WP] Core {wp_stats['core_version']} instalado")
-                    if wp_stats.get("theme_installed"):
-                        self._safe_result(f"[WP] Tema '{wp_stats['theme_slug']}' instalado")
+                    result.cms_restore_log.extend(wp_cleaner2.log)
                     if wp_stats.get("cleaned_files"):
                         self._safe_detail(f"[WP] Residuos limpiados: {wp_stats['cleaned_files']}")
                     if wp_stats.get("cleaned_empty_dirs"):
-                        self._safe_detail(f"[WP] Carpetas vacias eliminadas: {wp_stats['cleaned_empty_dirs']}")
-                    if wp_stats.get("dirs_ensured"):
-                        self._safe_detail(f"[WP] Dirs wp-content creados: {wp_stats['dirs_ensured']}")
+                        self._safe_detail(
+                            f"[WP] Carpetas vacias eliminadas: {wp_stats['cleaned_empty_dirs']}")
 
             # ── FASE 5: Restauracion CMS (post-wipe) ──
             if self.restore_cms_var.get() and info.cms_detected and is_clean:
                 self._safe_phase(5, "Restauracion de CMS")
                 self._safe_status("Restaurando desde repositorios oficiales...")
+                # v2.6.6: la fase 5 identifica activos y reinstala TODOS los plugins
+                # (activos + inactivos desde cuarentena) y usa la version pre-wipe.
                 restorer = CMSRestorer(info.extract_dir,
-                    progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)))
+                    progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
+                    quarantine_dir=result.quarantine_dir,
+                    wp_versions=result.wp_versions_prewipe)
                 restore_log = restorer.restore_all(info.cms_detected, backup_info=info)
                 result.cms_restore_log = restore_log
                 ok = sum(1 for e in restore_log if e["type"] == "success")
@@ -452,7 +494,11 @@ class CpacleanSApp(ctk.CTk):
                     result.db_prefixes = detected_prefixes
 
                 # Plugins/temas con filtro de reputacion v2.6.0
-                if info.cms_detected and result.quarantine_dir:
+                # v2.6.6: WordPress se excluye aqui — sus addons ya se separan
+                # pre-wipe (fase 4) y se reinstalan completos desde WP.org (fase 5,
+                # que es la puerta de reputacion). Este paso queda para CMS no-WP.
+                cms_for_cleaner = [c for c in info.cms_detected if c != "wordpress"]
+                if cms_for_cleaner and result.quarantine_dir:
                     plugin_cleaner = CMSPluginCleaner(
                         extract_dir=info.extract_dir,
                         quarantine_dir=result.quarantine_dir,
@@ -460,8 +506,11 @@ class CpacleanSApp(ctk.CTk):
                         progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)),
                         db_paths=db_paths,
                     )
-                    pt_counts = plugin_cleaner.process(info.cms_detected)
-                    result.plugins_temas_log = plugin_cleaner.removal_log
+                    pt_counts = plugin_cleaner.process(cms_for_cleaner)
+                    # v2.6.6: extender (no reemplazar) para conservar el log de
+                    # separacion pre-wipe de WordPress de la fase 4
+                    result.plugins_temas_log = (result.plugins_temas_log or [])
+                    result.plugins_temas_log.extend(plugin_cleaner.removal_log)
                     if not result.db_prefixes:
                         result.db_prefixes = plugin_cleaner.get_detected_prefixes()
                     if pt_counts["total"] > 0:
@@ -513,6 +562,12 @@ class CpacleanSApp(ctk.CTk):
                     db_interventions = db_cleaner.process(db_paths)
                     result.db_interventions_log = db_interventions
 
+                    # v2.6.7: recolectar cron/usuarios/contrasenas generadas
+                    result.db_cron_log = db_cleaner.cron_log
+                    result.db_users_log = db_cleaner.users_log
+                    result.generated_passwords = db_cleaner.generated_passwords
+                    result.db_very_infected = db_cleaner.db_very_infected
+
                     # Separar spam posts del log general
                     spam_posts = [i for i in db_interventions if i.get("type") == "spam_post"]
                     result.spam_posts_log = spam_posts
@@ -522,6 +577,11 @@ class CpacleanSApp(ctk.CTk):
                         deleted = sum(1 for i in non_spam if "deleted" in i.get("type", "") or "removed" in i.get("type", ""))
                         suspicious = sum(1 for i in non_spam if i.get("type") == "suspicious")
                         self._safe_result(f"BD: {deleted} filas eliminadas, {suspicious} sospechosas")
+                    if db_cleaner.cron_log:
+                        self._safe_result(f"BD: {len(db_cleaner.cron_log)} eventos cron inseguros neutralizados")
+                    if db_cleaner.users_log:
+                        removed_u = sum(1 for u in db_cleaner.users_log if "eliminado" in u.get("action", ""))
+                        self._safe_result(f"BD: usuarios peligrosos eliminados: {removed_u}; contrasena regenerada")
                     if spam_posts:
                         spam_deleted = sum(1 for s in spam_posts if s.get("action") == "deleted")
                         self._safe_result(f"Posts SPAM: {len(spam_posts)} detectados, {spam_deleted} eliminados")
@@ -557,7 +617,7 @@ class CpacleanSApp(ctk.CTk):
             self.after(0, self._scan_finished)
 
         except Exception as e:
-            self._safe_log(f"\n  ERROR: {e}")
+            self._safe_log(f"\n  ERROR: {e}\n{traceback.format_exc()}")
             self._safe_status(f"Error: {e}")
             self.after(0, self._unlock_ui)
 
@@ -597,17 +657,20 @@ class CpacleanSApp(ctk.CTk):
         try:
             packager = BackupPackager(
                 progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)))
-            output_base = str(Path(self._backup_info.path if hasattr(self._backup_info, 'path') else '').parent
-                             or Path.cwd())
-            if backup_info:
-                output_base = str(Path(backup_info.path).parent)
+            output_base = str(Path(extract_dir).parent)
 
             # Obtener SQL files del backup_info
             sql_files = backup_info.structure.get("databases", []) if backup_info else []
             domain = name or "sitio"
 
+            # v2.6.7 Bug #3: usar la cuarentena principal del escaneo (una sola)
+            existing_q = None
+            if self._scan_result and getattr(self._scan_result, "quarantine_dir", ""):
+                existing_q = self._scan_result.quarantine_dir
+
             result = packager.create_critical_mode_output(
-                extract_dir, sql_files, output_base, domain)
+                extract_dir, sql_files, output_base, domain,
+                quarantine_dir=existing_q)
 
             if result.get("homedir_tar"):
                 size = round(Path(result["homedir_tar"]).stat().st_size / (1024 * 1024), 1)

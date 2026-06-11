@@ -22,7 +22,24 @@ CONFIRMED_MALWARE_CATEGORIES = {
     "cms_ini_injection", "double_extension",
     "malicious_attachment",
     "htaccess_redirect", "htaccess_handler", "htaccess_php",
+    "mailer_backdoor",  # v2.6.5: cfg.php con SPAM relay / phishing
 }
+
+# v2.6.6: Drop-ins legitimos de WordPress que pueden vivir en wp-content/ (raiz).
+# Cualquier OTRO .php en wp-content (fuera de plugins/ y themes/) se cuarentena.
+_WPCONTENT_CORE_PHP = frozenset({
+    "index.php",            # stub "silence is golden" de proteccion
+    "advanced-cache.php",   # drop-in de cache
+    "object-cache.php",     # drop-in de object cache
+    "db.php",               # drop-in de base de datos
+    "sunrise.php",          # drop-in multisite
+    "blog-deleted.php", "blog-inactive.php", "blog-suspended.php",
+})
+
+# v2.6.6: subdirectorios de wp-content cuyo .php gestiona el flujo separar+reinstalar
+# (NO se tocan en clean_findings — se mueven completos a cuarentena pre-wipe y se
+#  reinstalan limpios en fase 5; los premium se conservan en cuarentena).
+_WPCONTENT_ADDON_DIRS = frozenset({"plugins", "themes"})
 
 
 @dataclass
@@ -73,6 +90,16 @@ class ScanResult:
     wipe_result: dict = field(default_factory=dict)
     # v2.6.0 — manifiesto del empaquetado modo critico
     critical_output_manifest: dict = field(default_factory=dict)
+    # v2.6.2 — backups aislados ANTES del escaneo (no son amenazas)
+    backups_isolated_log: list = field(default_factory=list)
+    # v2.6.6 — versiones WP detectadas pre-wipe (version.php se borra en el wipe;
+    # se consumen en fase 5 para instalar el core correcto). {wp_root: version}
+    wp_versions_prewipe: dict = field(default_factory=dict)
+    # v2.6.7 — endurecimiento de BD y reporte
+    db_cron_log: list = field(default_factory=list)        # eventos cron inseguros
+    db_users_log: list = field(default_factory=list)       # usuarios limpiados
+    generated_passwords: dict = field(default_factory=dict)  # contrasenas generadas
+    db_very_infected: bool = False
 
 
 # --- Multiprocessing worker con scanners persistentes por proceso ---
@@ -379,16 +406,64 @@ class ScanEngine:
         return files, 0
 
     def setup_quarantine(self, base_dir: str) -> str:
+        """Crea (o reutiliza) la estructura de cuarentena.
+
+        v2.6.2: Si quarantine_dir ya fue configurado por pre_scan_quarantine_setup(),
+        reutiliza el directorio existente en lugar de crear uno nuevo con otro timestamp.
+        Estructura unificada: originales_intactos/, amenazas_removidas/, archivos_0kb/,
+        cms_components/ (era plugins_temas + plugins_temas_separados), backups/.
+        """
+        # Reutilizar si ya fue configurado (e.g., por pre_scan_quarantine_setup)
+        if self.result.quarantine_dir:
+            qdir = Path(self.result.quarantine_dir)
+            if qdir.exists():
+                # Asegurar subdirs requeridos
+                for d in ("originales_intactos", "amenazas_removidas",
+                          "archivos_0kb", "cms_components", "backups"):
+                    (qdir / d).mkdir(exist_ok=True)
+                return str(qdir)
+
         ts = time.strftime("%Y%m%d_%H%M%S")
         qdir = Path(base_dir) / f"cuarentena_{ts}"
         qdir.mkdir(parents=True, exist_ok=True)
         (qdir / "originales_intactos").mkdir(exist_ok=True)
         (qdir / "amenazas_removidas").mkdir(exist_ok=True)
         (qdir / "archivos_0kb").mkdir(exist_ok=True)
-        (qdir / "plugins_temas_separados" / "premium").mkdir(parents=True, exist_ok=True)
-        (qdir / "plugins_temas_separados" / "sospechosos").mkdir(parents=True, exist_ok=True)
+        # v2.6.2: estructura unificada — elimina plugins_temas_separados duplicado
+        (qdir / "cms_components").mkdir(exist_ok=True)
+        (qdir / "backups").mkdir(exist_ok=True)
         self.result.quarantine_dir = str(qdir)
         return str(qdir)
+
+    def pre_scan_quarantine_setup(self, base_dir: str) -> str:
+        """v2.6.2: Configura la cuarentena ANTES del escaneo.
+
+        Permite aislar backups pre-scan sin requerir que el scan haya terminado.
+        Llama a setup_quarantine() con la misma logica pero con nombre semantico.
+        """
+        return self.setup_quarantine(base_dir)
+
+    def isolate_backups_pre_scan(self, extract_dir: str) -> list:
+        """v2.6.2: Aísla dirs y archivos de backup ANTES del escaneo principal.
+
+        Requiere que pre_scan_quarantine_setup() haya sido llamado antes.
+        Los backups no son malware — se mueven a quarantine/backups/ para:
+        - Evitar que el scanner PHP los analice innecesariamente
+        - Mantenerlos disponibles para el usuario post-limpieza
+        - No contabilizarlos como amenazas en el reporte
+
+        Retorna lista de dicts {path, name, type, action} para el reporte.
+        """
+        if not self.result.quarantine_dir:
+            return []
+        from ..quarantine.manager import QuarantineManager
+        qm = QuarantineManager(
+            self.result.quarantine_dir,
+            progress_callback=self.progress_callback,
+        )
+        log = qm.isolate_backups(extract_dir)
+        self.result.backups_isolated_log = log
+        return log
 
     def clean_findings(self, quarantine_base: str, mode: str = CLEAN_MODE_NORMAL) -> int:
         self.result.clean_mode_used = mode
@@ -423,29 +498,122 @@ class ScanEngine:
                 self.progress_callback("status", f"[PROTEGIDO cPanel] {fp.name} — no cuarentenado")
                 continue
 
-            try:
-                safe_name = fp.name
-                counter = 0
-                dest_orig = originals_dir / safe_name
-                dest_removed = removed_dir / safe_name
-                while dest_orig.exists():
-                    counter += 1
-                    dest_orig = originals_dir / f"{fp.stem}_{counter}{fp.suffix}"
-                    dest_removed = removed_dir / f"{fp.stem}_{counter}{fp.suffix}"
-
-                shutil.copy2(str(fp), str(dest_orig))
-                if mode == CLEAN_MODE_STRICT:
-                    os.remove(str(fp))
-                else:
-                    shutil.move(str(fp), str(dest_removed))
+            if self._quarantine_or_delete(fp, originals_dir, removed_dir, mode):
                 finding.cleaned = True
                 already_processed.add(str(fp))
                 cleaned += 1
-            except (OSError, PermissionError, shutil.Error):
-                pass
+
+        # v2.6.6 Mejora #1: mover/eliminar TODOS los .md hallados en la limpieza
+        cleaned += self._sweep_markdown(originals_dir, removed_dir, mode, already_processed)
+
+        # v2.6.6 Mejora #2: .php no-core dentro de wp-content (y todo .php en uploads/)
+        cleaned += self._sweep_wpcontent_php(originals_dir, removed_dir, mode, already_processed)
 
         self.result.total_cleaned = cleaned
         return cleaned
+
+    def _quarantine_or_delete(self, fp: Path, originals_dir: Path,
+                              removed_dir: Path, mode: str) -> bool:
+        """Copia el original a originales_intactos y mueve a amenazas_removidas
+        (modo normal/intermedio) o elimina (estricto). Retorna True si tuvo exito.
+
+        Nunca toca archivos core de cPanel necesarios para restore en WHM.
+        """
+        if not fp.exists():
+            return False
+        if self._is_cpanel_protected(str(fp)):
+            self.progress_callback("status", f"[PROTEGIDO cPanel] {fp.name} — no cuarentenado")
+            return False
+        try:
+            counter = 0
+            dest_orig = originals_dir / fp.name
+            dest_removed = removed_dir / fp.name
+            while dest_orig.exists():
+                counter += 1
+                dest_orig = originals_dir / f"{fp.stem}_{counter}{fp.suffix}"
+                dest_removed = removed_dir / f"{fp.stem}_{counter}{fp.suffix}"
+
+            shutil.copy2(str(fp), str(dest_orig))
+            if mode == CLEAN_MODE_STRICT:
+                os.remove(str(fp))
+            else:
+                shutil.move(str(fp), str(dest_removed))
+            return True
+        except (OSError, PermissionError, shutil.Error):
+            return False
+
+    def _sweep_markdown(self, originals_dir: Path, removed_dir: Path,
+                        mode: str, already_processed: set) -> int:
+        """v2.6.6: cuarentena/elimina todos los archivos .md del extract_dir."""
+        if not self._extract_dir:
+            return 0
+        count = 0
+        for root, dirs, files in os.walk(self._extract_dir):
+            for fname in files:
+                if fname.lower().endswith(".md"):
+                    fp = Path(root) / fname
+                    if str(fp) in already_processed:
+                        continue
+                    if self._quarantine_or_delete(fp, originals_dir, removed_dir, mode):
+                        already_processed.add(str(fp))
+                        count += 1
+        if count:
+            self.progress_callback("status", f"Archivos .md removidos: {count}")
+        return count
+
+    def _sweep_wpcontent_php(self, originals_dir: Path, removed_dir: Path,
+                             mode: str, already_processed: set) -> int:
+        """v2.6.8 Bug #2: mover a cuarentena/eliminar .php sospechoso dentro de
+        wp-content, PERO NO de plugins/ ni themes/ — esas carpetas las procesa por
+        completo CMSPluginCleaner (separar + reinstalar limpio desde WP.org).
+
+        Reglas:
+          - plugins/ y themes/ (y todo su arbol): NO se tocan aqui.
+          - wp-content/ raiz: .php que no sea drop-in core de WordPress.
+          - uploads/ y subcarpetas: cualquier .php (jamas legitimo en uploads).
+          - resto de subdirs (mu-plugins, languages, cache, carpetas no
+            reconocidas...): cualquier .php salvo el index.php de proteccion.
+
+        En modo normal/intermedio se mueve a cuarentena (recuperable); en estricto
+        se elimina.
+        """
+        if not self._extract_dir:
+            return 0
+        count = 0
+        for root, dirs, files in os.walk(self._extract_dir):
+            rp = Path(root)
+            if rp.name != "wp-content":
+                continue
+            # Recorrer el arbol completo de wp-content
+            for sub_root, sub_dirs, sub_files in os.walk(rp):
+                srp = Path(sub_root)
+                rel_parts = srp.relative_to(rp).parts
+                top = rel_parts[0].lower() if rel_parts else ""
+                # NO tocar plugins/ ni themes/ (CMSPluginCleaner los gestiona)
+                if top in _WPCONTENT_ADDON_DIRS:
+                    continue
+                in_uploads = top == "uploads"
+                at_root = (srp == rp)
+                for fname in sub_files:
+                    if not fname.lower().endswith(".php"):
+                        continue
+                    fp = srp / fname
+                    if str(fp) in already_processed:
+                        continue
+                    if in_uploads:
+                        should = True  # uploads: ningun .php es legitimo
+                    elif at_root:
+                        should = fname.lower() not in _WPCONTENT_CORE_PHP
+                    else:
+                        # subdirs (mu-plugins, languages, cache, no reconocidas):
+                        # cualquier .php salvo el index.php de proteccion
+                        should = fname.lower() != "index.php"
+                    if should and self._quarantine_or_delete(fp, originals_dir, removed_dir, mode):
+                        already_processed.add(str(fp))
+                        count += 1
+        if count:
+            self.progress_callback("status", f"PHP no-core en wp-content removidos: {count}")
+        return count
 
     def _is_cpanel_protected(self, file_path: str) -> bool:
         """Retorna True si el archivo es core de cPanel y NO debe ser cuarentenado.
@@ -481,12 +649,19 @@ class ScanEngine:
         return count
 
     def separate_premium_suspicious(self, extract_dir: str, cms_restore_log: list) -> dict:
-        """Separa plugins/temas premium y sospechosos fuera del backup limpio."""
+        """Separa plugins/temas premium y sospechosos fuera del backup limpio.
+
+        v2.6.2: Usa cms_components/wordpress/premium/ y cms_components/wordpress/sospechosos/
+        en lugar de la estructura duplicada plugins_temas_separados/.
+        """
         if not self.result.quarantine_dir:
             return {"premium": 0, "suspicious": 0}
-        sep_dir = Path(self.result.quarantine_dir) / "plugins_temas_separados"
-        premium_dir = sep_dir / "premium"
-        suspicious_dir = sep_dir / "sospechosos"
+        # v2.6.2: estructura unificada bajo cms_components/
+        cms_base = Path(self.result.quarantine_dir) / "cms_components" / "wordpress"
+        premium_dir = cms_base / "premium"
+        suspicious_dir = cms_base / "sospechosos"
+        premium_dir.mkdir(parents=True, exist_ok=True)
+        suspicious_dir.mkdir(parents=True, exist_ok=True)
 
         premium_slugs = set()
         for entry in cms_restore_log:

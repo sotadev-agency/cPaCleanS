@@ -66,11 +66,17 @@ class BackupPackager:
         self.progress_callback("status",
             f"Backup parcial cPanel: {len(items_to_pack)} dirs criticos ({cpanel_user})...")
 
+        def _no_quarantine(tarinfo):
+            # v2.6.5: excluir dirs de cuarentena del compreso
+            if tarinfo.isdir() and os.path.basename(tarinfo.name).lower().startswith("cuarentena"):
+                return None
+            return tarinfo
+
         with tarfile.open(output_path, "w:gz", compresslevel=6) as tar:
             for i, item in enumerate(items_to_pack):
                 try:
                     arcname = os.path.join(cpanel_user, item.name)
-                    tar.add(str(item), arcname=arcname)
+                    tar.add(str(item), arcname=arcname, filter=_no_quarantine)
                 except (OSError, PermissionError, tarfile.TarError):
                     pass
                 pct = int((i + 1) / len(items_to_pack) * 100)
@@ -102,6 +108,8 @@ class BackupPackager:
 
         all_files = []
         for root, dirs, files in os.walk(source):
+            # v2.6.5: excluir directorios de cuarentena del compreso limpio
+            dirs[:] = [d for d in dirs if not d.lower().startswith("cuarentena")]
             for f in files:
                 all_files.append(os.path.join(root, f))
 
@@ -128,10 +136,15 @@ class BackupPackager:
 
     def create_critical_mode_output(self, extract_dir: str, sql_files: list,
                                      output_base_dir: str, domain: str = "sitio",
-                                     progress_callback: Callable = None) -> dict:
+                                     progress_callback: Callable = None,
+                                     quarantine_dir: str = None) -> dict:
         """Genera paquetes separados compatibles con cPanel Backup Restore.
         - homedir_backup.tar.gz: rutas relativas desde homedir
         - databases/*.sql.gz: cada BD como gzip directo
+
+        v2.6.7 Bug #3: una sola carpeta de cuarentena. Si se pasa `quarantine_dir`
+        (la cuarentena principal del escaneo) el contenido no esencial se guarda en
+        `<quarantine_dir>/no_esencial/` en vez de crear una segunda carpeta.
         """
         cb = progress_callback or self.progress_callback
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -179,11 +192,16 @@ class BackupPackager:
             result["homedir_tar"] = homedir_tar
             result["included_count"] = included_count
 
-            # Mover excluidos a cuarentena
-            quarantine_dir = str(output_folder / "cuarentena")
+            # v2.6.7 Bug #3: una sola cuarentena. Reutiliza la cuarentena principal
+            # del escaneo si se proporciona; el contenido no esencial va a no_esencial/.
+            if quarantine_dir:
+                qroot = Path(quarantine_dir)
+            else:
+                qroot = Path(output_base_dir) / f"cuarentena_{ts}"
+            no_esencial = qroot / "no_esencial"
             excluded = self._move_to_critical_quarantine(
-                homedir, included_paths, quarantine_dir)
-            result["quarantine_dir"] = quarantine_dir
+                homedir, included_paths, str(no_esencial))
+            result["quarantine_dir"] = str(qroot)
             result["excluded_count"] = excluded
 
         # 2. Empaquetar bases de datos como .sql.gz individuales
@@ -244,26 +262,35 @@ class BackupPackager:
             if not fp.exists():
                 continue
 
-            # Detectar nombre BD desde comentario del dump
-            db_name = fp.stem  # fallback: nombre del archivo
+            # Detectar nombre BD desde comentario del dump (soporta .sql y .sql.gz)
+            db_name = fp.stem.removesuffix(".sql") if fp.suffix == ".gz" else fp.stem
             try:
-                with open(sql_path, "r", encoding="utf-8", errors="replace") as f:
-                    for line in f:
+                opener = (gzip.open(sql_path, "rt", encoding="utf-8", errors="replace")
+                          if sql_path.endswith(".gz")
+                          else open(sql_path, "r", encoding="utf-8", errors="replace"))
+                with opener as f:
+                    for i, line in enumerate(f):
+                        if i > 30:
+                            break
                         if line.startswith("--"):
                             m = re.search(r'Database:\s*`?(\w+)`?', line)
                             if m:
                                 db_name = m.group(1)
                                 break
-                        if not line.startswith("-") and not line.startswith("/"):
+                        if not line.startswith("-") and not line.startswith("\\"):
                             break
             except (OSError, PermissionError):
                 pass
 
             out_path = Path(db_output_dir) / f"{db_name}.sql.gz"
             try:
-                with open(sql_path, "rb") as src:
-                    with gzip.open(str(out_path), "wb", compresslevel=6) as dst:
-                        shutil.copyfileobj(src, dst)
+                # Si ya es .sql.gz, copiar directamente; si es .sql plano, comprimir
+                if sql_path.endswith(".gz"):
+                    shutil.copy2(sql_path, str(out_path))
+                else:
+                    with open(sql_path, "rb") as src:
+                        with gzip.open(str(out_path), "wb", compresslevel=6) as dst:
+                            shutil.copyfileobj(src, dst)
                 results.append(str(out_path))
             except (OSError, PermissionError):
                 pass

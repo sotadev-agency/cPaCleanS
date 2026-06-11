@@ -1,4 +1,4 @@
-"""WordPressCleaner v2.6.1 — limpieza profunda y restauracion completa de WordPress.
+"""WordPressCleaner v2.6.6 — limpieza profunda y restauracion completa de WordPress.
 
 Resuelve los problemas de la cadena wipe -> restore:
   1. Detecta version WP y tema activo ANTES del wipe (pre_wipe_detect)
@@ -32,6 +32,7 @@ _WP_ROOT_JUNK = frozenset([
 # Archivos no criticos en wp-content que deben eliminarse
 _WPCONTENT_JUNK = frozenset([
     "maintenance.php", "hello.php", "error_log",
+    "readme.md", "readme.txt", "readme.html",
 ])
 
 # Archivos que NUNCA se eliminan
@@ -71,6 +72,10 @@ class WordPressCleaner:
 
     def pre_wipe_detect(self) -> dict:
         """Detecta version WP, tema activo y plugins activos ANTES del wipe.
+
+        v2.6.3 Bug #1: Prioriza lectura de BD sobre filesystem. La BD contiene
+        el estado real de activacion; el filesystem solo refleja archivos presentes.
+
         Retorna dict con la info cacheada para usar en post_wipe_clean().
         """
         wp_roots = self._find_wp_roots()
@@ -84,6 +89,19 @@ class WordPressCleaner:
             "active_plugins": {},
         }
 
+        # ── v2.6.3: Leer BD PRIMERO — es la fuente autoritativa ──
+        if self.backup_info and hasattr(self.backup_info, "structure"):
+            db_paths = self.backup_info.structure.get("databases", [])
+            for db_path in db_paths:
+                plugins, theme = self._read_wp_active_from_sql(db_path)
+                for wp_root in wp_roots:
+                    root_key = str(wp_root)
+                    # BD tiene prioridad: sobreescribe cualquier valor previo
+                    if theme:
+                        info["active_themes"][root_key] = theme
+                    if plugins:
+                        info["active_plugins"].setdefault(root_key, set()).update(plugins)
+
         for wp_root in wp_roots:
             root_key = str(wp_root)
 
@@ -92,48 +110,72 @@ class WordPressCleaner:
             if version:
                 info["versions"][root_key] = version
 
-            # Tema activo desde style.css del tema actual o desde SQL
-            active_theme = self._detect_active_theme_from_fs(wp_root)
-            if active_theme:
-                info["active_themes"][root_key] = active_theme
-
-        # Leer plugins/tema activo desde dumps SQL
-        if self.backup_info and hasattr(self.backup_info, "structure"):
-            db_paths = self.backup_info.structure.get("databases", [])
-            for db_path in db_paths:
-                plugins, theme = self._read_wp_active_from_sql(db_path)
-                # Aplicar a todos los roots que no tengan tema detectado
-                for wp_root in wp_roots:
-                    root_key = str(wp_root)
-                    if theme and root_key not in info["active_themes"]:
-                        info["active_themes"][root_key] = theme
-                    if plugins:
-                        info["active_plugins"].setdefault(root_key, set()).update(plugins)
+            # v2.6.3: Filesystem como FALLBACK si BD no dio tema
+            if root_key not in info["active_themes"]:
+                active_theme = self._detect_active_theme_from_fs(wp_root)
+                if active_theme:
+                    info["active_themes"][root_key] = active_theme
 
         # Convertir sets a listas para serializar
         for k, v in info["active_plugins"].items():
             if isinstance(v, set):
                 info["active_plugins"][k] = list(v)
 
+        themes_found = list(info["active_themes"].values())
+        plugins_total = sum(len(v) for v in info["active_plugins"].values())
         self.progress_callback("status",
             f"[WP] Pre-wipe: {len(wp_roots)} instalaciones, "
-            f"versiones: {list(info['versions'].values())}")
+            f"versiones: {list(info['versions'].values())}, "
+            f"tema: {themes_found}, plugins activos: {plugins_total}")
 
         return info
+
+    def pre_wipe_separate_addons(self) -> list:
+        """Mueve plugins y temas a quarantine/cms_components/ ANTES del wipe.
+
+        v2.6.3 Bug #3: El orden correcto es:
+          a) limpiar archivos de malware  (clean_findings — ya ejecutado)
+          b) mover plugins+temas a cuarentena  ← ESTE METODO
+          c) wipe del core
+          d) instalar core + plugins + tema desde wordpress.org
+
+        No ejecuta en SCAN_MODE_ONLY (no modifica nada).
+        Retorna lista de addons movidos para el reporte.
+        """
+        if self.clean_mode == SCAN_MODE_ONLY:
+            return []
+
+        wp_roots = [str(r) for r in self._find_wp_roots()]
+        if not wp_roots:
+            return []
+
+        from ..quarantine.manager import QuarantineManager
+        qm = QuarantineManager(
+            str(self.quarantine_dir),
+            progress_callback=self.progress_callback,
+        )
+        return qm.move_wp_addons_to_quarantine(wp_roots)
 
     # ─────────────────────────────────────────────────────────────
     # POST-WIPE: limpieza profunda + instalacion core + tema
     # ─────────────────────────────────────────────────────────────
 
-    def post_wipe_clean(self, wp_info: dict) -> dict:
+    def post_wipe_clean(self, wp_info: dict, do_install: bool = True) -> dict:
         """Ejecutar DESPUES del wipe. Usa info cacheada de pre_wipe_detect().
 
+        v2.6.6 — `do_install=False` deja esta operacion en SOLO LIMPIEZA:
+        garantiza dirs, limpia residuos y carpetas vacias, pero NO descarga ni
+        instala core/plugins/temas. La reinstalacion es exclusiva de la fase 5.
+
+        Orden de operaciones (con do_install=True):
         1. Garantizar dirs wp-content/{languages,plugins,themes,uploads}
         2. Descargar e instalar core WP limpio
-        3. Descargar e instalar tema activo limpio
-        4. Limpieza profunda de residuos no criticos
-        5. Limpiar carpetas vacias y residuos en wp-content
+        3. Instalar plugins activos disponibles en wordpress.org
+        4. Instalar tema activo limpio desde wordpress.org
+        5. Limpieza profunda de residuos no criticos (todos los modos)
+        6. Limpiar carpetas vacias y residuos en wp-content
 
+        Los plugins premium o no disponibles se registran como 'manual_required'.
         Retorna dict con stats de la operacion.
         """
         if self.clean_mode == SCAN_MODE_ONLY:
@@ -144,6 +186,8 @@ class WordPressCleaner:
             "core_version": "",
             "theme_installed": False,
             "theme_slug": "",
+            "plugins_installed": 0,
+            "plugins_manual": 0,
             "cleaned_files": 0,
             "cleaned_empty_dirs": 0,
             "dirs_ensured": 0,
@@ -153,6 +197,16 @@ class WordPressCleaner:
         if not wp_roots:
             wp_roots = self._find_wp_roots()
 
+        # Preparar restorer de plugins (solo si se va a instalar)
+        restorer = None
+        if do_install:
+            from ..restore.cms_restore import WPAddonRestorer
+            restorer = WPAddonRestorer(
+                clean_mode=self.clean_mode,
+                cache_dir=str(self._cache_dir),
+                progress_callback=self.progress_callback,
+            )
+
         for wp_root in wp_roots:
             root_key = str(wp_root)
 
@@ -160,41 +214,74 @@ class WordPressCleaner:
             ensured = self._ensure_wpcontent_dirs(wp_root)
             stats["dirs_ensured"] += ensured
 
-            # 2. Instalar core WP limpio
-            version = wp_info.get("versions", {}).get(root_key, "")
-            if not version:
-                version = self._detect_wp_version(wp_root)
-            if not version:
-                version = self._get_latest_wp_version()
+            # 2-4. Instalacion de core/plugins/tema — SOLO si do_install (v2.6.6:
+            # en fase 4 do_install=False; la reinstalacion vive en la fase 5)
+            if do_install:
+                # 2. Instalar core WP limpio
+                version = wp_info.get("versions", {}).get(root_key, "")
+                if not version:
+                    version = self._detect_wp_version(wp_root)
+                if not version:
+                    version = self._get_latest_wp_version()
 
-            if version:
-                installed = self._install_wp_core(wp_root, version)
-                if installed:
-                    stats["core_installed"] = True
-                    stats["core_version"] = version
+                if version:
+                    installed = self._install_wp_core(wp_root, version)
+                    if installed:
+                        stats["core_installed"] = True
+                        stats["core_version"] = version
 
-            # 3. Instalar tema activo limpio
-            theme_slug = wp_info.get("active_themes", {}).get(root_key, "")
-            if theme_slug:
-                theme_ok = self._install_theme(wp_root, theme_slug)
-                if theme_ok:
-                    stats["theme_installed"] = True
-                    stats["theme_slug"] = theme_slug
+                # 3. Instalar plugins activos desde wordpress.org
+                active_plugins = wp_info.get("active_plugins", {}).get(root_key, [])
+                if active_plugins:
+                    plugin_result = restorer.install_active_plugins(wp_root, active_plugins)
+                    stats["plugins_installed"] += len(plugin_result["installed"])
+                    stats["plugins_manual"] += len(plugin_result["manual"])
 
-            # 4. Limpieza profunda de residuos
+                    # Registrar instalados en log
+                    for p in plugin_result["installed"]:
+                        self.log.append({
+                            "type": "success", "cms": "wordpress",
+                            "message": f"Plugin '{p['slug']}' v{p['version']} instalado desde wordpress.org",
+                        })
+                    # Registrar manuales en log (para seccion del reporte)
+                    for p in plugin_result["manual"]:
+                        self.log.append({
+                            "type": "manual_required",
+                            "cms": "wordpress",
+                            "name": p["slug"],
+                            "version": wp_info.get("_plugin_versions", {}).get(p["slug"], "desconocida"),
+                            "reason": p["reason"],
+                            "message": (
+                                f"Plugin '{p['slug']}' requiere instalacion manual "
+                                f"— {p['reason']}"
+                            ),
+                        })
+
+                # 4. Instalar tema activo limpio
+                theme_slug = wp_info.get("active_themes", {}).get(root_key, "")
+                if theme_slug:
+                    theme_ok = self._install_theme(wp_root, theme_slug)
+                    if theme_ok:
+                        stats["theme_installed"] = True
+                        stats["theme_slug"] = theme_slug
+
+            # 5. Limpieza profunda de residuos — todos los modos no-scan
+            # Tambien limpia subdirectorios (no solo raiz de wp-content)
             cleaned = self._deep_clean_residuals(wp_root)
             stats["cleaned_files"] += cleaned
 
-            # 5. Limpiar carpetas vacias y residuos en wp-content
+            # 6. Limpiar carpetas vacias y residuos en wp-content
             empty_cleaned = self._clean_empty_dirs(wp_root)
             stats["cleaned_empty_dirs"] += empty_cleaned
 
-            # 6. Garantizar dirs wp-content de nuevo (por si la limpieza los borro)
+            # 7. Garantizar dirs wp-content de nuevo (por si la limpieza los borro)
             self._ensure_wpcontent_dirs(wp_root)
 
         self.progress_callback("status",
             f"[WP] Post-wipe: core={'OK' if stats['core_installed'] else 'N/A'} "
             f"v{stats['core_version']}, tema={stats['theme_slug'] or 'N/A'}, "
+            f"plugins={stats['plugins_installed']} instalados "
+            f"{stats['plugins_manual']} manuales, "
             f"residuos={stats['cleaned_files']}")
 
         return stats
@@ -322,14 +409,16 @@ class WordPressCleaner:
                                  "message": f"Error copiando {core_dir}: {e}"})
 
         # Copiar archivos PHP raiz (excepto wp-config.php)
+        _skip_root = frozenset({
+            "wp-config.php", "wp-config-sample.php",
+            "readme.html", "license.txt", "licence.txt", ".maintenance",
+        })
         root_copied = 0
         try:
             for item in clean_dir.iterdir():
                 if not item.is_file():
                     continue
-                if item.name.lower() == "wp-config-sample.php":
-                    continue
-                if item.name.lower() in {"wp-config.php"}:
+                if item.name.lower() in _skip_root:
                     continue
                 try:
                     shutil.copy2(str(item), str(wp_root / item.name))
@@ -475,7 +564,12 @@ class WordPressCleaner:
     # ─────────────────────────────────────────────────────────────
 
     def _deep_clean_residuals(self, wp_root: Path) -> int:
-        """Elimina archivos no criticos que el wiper estandar no cubre."""
+        """Elimina archivos no criticos que el wiper estandar no cubre.
+
+        v2.6.3 Bug #2: Ampliado para limpiar _WPCONTENT_JUNK en TODOS los
+        subdirectorios de wp-content (no solo en la raiz). Cubre casos como
+        error_log, hello.php e index.php no-funcionales en cualquier subdirectorio.
+        """
         cleaned = 0
         junk_dir = self.quarantine_dir / "wp_residuales"
 
@@ -487,42 +581,83 @@ class WordPressCleaner:
             if name_lower in _WP_ROOT_JUNK:
                 cleaned += self._remove_or_quarantine(item, junk_dir)
 
-        # 2. Archivos junk en wp-content/
+        # 2. Archivos junk en wp-content/ (raiz Y subdirectorios — v2.6.3)
         wpc = wp_root / "wp-content"
         if wpc.exists():
+            # 2a. Raiz de wp-content: junk conocido + PHP no-funcionales
             for item in self._safe_iterdir(wpc):
                 if not item.is_file():
                     continue
                 name_lower = item.name.lower()
                 if name_lower in _WPCONTENT_JUNK:
                     cleaned += self._remove_or_quarantine(item, junk_dir)
-                # .php no criticos sueltos en wp-content (no en subdirs)
                 elif name_lower.endswith(".php") and name_lower not in (
                         "index.php", "advanced-cache.php", "object-cache.php",
                         "db.php", "sunrise.php", "blog-deleted.php",
                         "blog-inactive.php", "blog-suspended.php",
                 ):
-                    cleaned += self._remove_or_quarantine(item, junk_dir)
+                    # v2.6.2+2.6.3: Solo remover PHP sin codigo ejecutable
+                    try:
+                        from ..scanners.php_scanner import is_php_functional
+                        php_content = item.read_text(encoding="utf-8", errors="replace")
+                        if not is_php_functional(php_content):
+                            cleaned += self._remove_or_quarantine(item, junk_dir)
+                    except (OSError, ImportError):
+                        pass
 
-            # 3. error_log y .htaccess sueltos en subdirs de wp-content
-            #    (excepto en dirs que los necesitan: uploads, plugins, themes)
+            # 2b. v2.6.3: subdirs de wp-content — junk conocido
+            # v2.6.8 Bug #2: NO tocar plugins/ ni themes/ — los procesa por completo
+            #  CMSPluginCleaner (separar + reinstalar). Aqui solo uploads, languages,
+            #  cache, mu-plugins y carpetas no reconocidas.
             for dirpath, dirnames, filenames in os.walk(wpc):
                 dp = Path(dirpath)
-                # No tocar .htaccess en raiz de wp-content, uploads, cache
-                is_safe_htaccess_dir = dp == wpc or any(
+                if dp == wpc:
+                    continue  # La raiz ya fue procesada en 2a
+                try:
+                    top_seg = dp.relative_to(wpc).parts[0].lower()
+                except (ValueError, IndexError):
+                    top_seg = ""
+                if top_seg in ("plugins", "themes"):
+                    continue  # gestionado por CMSPluginCleaner
+                is_safe_htaccess_dir = any(
                     dp == wpc / d for d in ("uploads", "cache", "upgrade")
                 )
                 for fname in filenames:
                     fpath = dp / fname
                     fl = fname.lower()
-                    if fl == "error_log":
+                    # Junk conocido en cualquier subdir
+                    if fl in _WPCONTENT_JUNK:
                         cleaned += self._remove_or_quarantine(fpath, junk_dir)
                     elif fl == ".htaccess" and not is_safe_htaccess_dir:
-                        # .htaccess en carpeta vacia o sin contenido real
                         siblings = [f for f in filenames if f.lower() != ".htaccess"]
-                        subdirs = dirnames
-                        if not siblings and not subdirs:
+                        if not siblings and not dirnames:
                             cleaned += self._remove_or_quarantine(fpath, junk_dir)
+
+        # 3. v2.6.4: index.php "silence is golden" en subdirectorios de wp-content
+        # Los dirs obligatorios (plugins/, themes/, languages/, uploads/) NECESITAN
+        # su propio index.php de proteccion; los demas subdirs no.
+        _silence_pattern = re.compile(
+            r'^\s*<\?php\s*\n?\s*//\s*Silence\s+is\s+golden\.?\s*$',
+            re.IGNORECASE | re.DOTALL,
+        )
+        _protected_top = {wpc / d for d in _WPCONTENT_REQUIRED_DIRS}
+        if wpc.exists():
+            for dirpath, _dirs, filenames in os.walk(wpc):
+                dp = Path(dirpath)
+                if dp in _protected_top:
+                    continue  # conservar index.php de proteccion en dirs obligatorios
+                if "index.php" not in [f.lower() for f in filenames]:
+                    continue
+                fpath = dp / "index.php"
+                try:
+                    content = fpath.read_text(encoding="utf-8", errors="replace")
+                    if _silence_pattern.match(content) or (
+                        len(content.strip()) <= 50
+                        and "silence" in content.lower()
+                    ):
+                        cleaned += self._remove_or_quarantine(fpath, junk_dir)
+                except OSError:
+                    pass
 
         # 4. error_log en raiz de wp-admin, wp-includes (post-restauracion)
         for core_dir in ["wp-admin", "wp-includes"]:
@@ -569,16 +704,19 @@ class WordPressCleaner:
                     for item in contents
                 )
                 if all_junk and len(contents) <= 2:
-                    # Verificar que index.php es el generico "silence is golden"
+                    # v2.6.2: Verificar que index.php no tiene codigo ejecutable real.
+                    # Un index.php funcional (con codigo real) indica dir con contenido
+                    # relevante — conservar. Un stub "silence is golden" → eliminar dir.
                     is_silence = True
                     for item in contents:
                         if item.name.lower() == "index.php":
                             try:
+                                from ..scanners.php_scanner import is_php_functional
                                 text = item.read_text(
                                     encoding="utf-8", errors="replace")
-                                if len(text.strip()) > 100:
+                                if is_php_functional(text):
                                     is_silence = False
-                            except OSError:
+                            except (OSError, ImportError):
                                 pass
                     if is_silence:
                         shutil.rmtree(str(dp), ignore_errors=True)

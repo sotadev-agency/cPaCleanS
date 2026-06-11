@@ -1,4 +1,15 @@
-"""Generador de reportes HTML + PDF para cPacleanS — formato legible y robusto."""
+"""Generador de reportes HTML + PDF para cPacleanS — formato legible y robusto.
+
+v2.6.7: el PDF se rediseña siguiendo la estructura del "Informe de limpieza":
+  1. Malware encontrado (con ruta original)
+  2. Plugins con malware / no instalados (dominio, nombre, autor, razon)
+  3. Entradas y comentarios extraños por dominio
+  4. Usuarios extraños por dominio
+  5. Contrasenas generadas (cPanel, WordPress, BD, correos) con nota de cambio
+  6. Observaciones adicionales (0KB, .htaccess, plugins de seguridad)
+  7. Recomendaciones segun hallazgos
+  8. Garantia de 30 dias post-limpieza
+"""
 import os
 from datetime import datetime
 from pathlib import Path
@@ -141,12 +152,91 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     </div>
     {% endif %}
 
+    {% if result.generated_passwords %}
+    <div class="box" style="border-color:#0f4a2a;">
+        <h2 style="color:#33ff99;">Contrasenas Generadas</h2>
+        <p style="color:#8892b0; font-size:11px; margin-bottom:10px;">
+            Nota: <strong style="color:#ffbb33;">cambiar por otra propia cuando pueda ingresar</strong>.
+        </p>
+        {% for cat, items in result.generated_passwords.items() %}
+        {% if items %}
+        <p style="color:#00d4ff; font-size:12px; margin-top:8px; text-transform:uppercase;">{{ cat }}</p>
+        <table>
+            <tbody>
+            {% for it in items %}
+            <tr>
+                <td style="font-size:11px;">{{ it.get('domain') or it.get('db') or it.get('email') or '-' }}</td>
+                <td style="font-size:11px;">{{ it.get('user') or '' }}</td>
+                <td style="font-family:Consolas,monospace; color:#33ff99;">{{ it.get('pass') }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if result.db_cron_log %}
+    <div class="box" style="border-color:#4a3a0f;">
+        <h2 style="color:#ffbb33;">Eventos Cron Inseguros Neutralizados ({{ result.db_cron_log|length }})</h2>
+        <table>
+            <thead><tr><th>Dominio</th><th>Hook</th><th>Razon</th><th>Accion</th></tr></thead>
+            <tbody>
+            {% for c in result.db_cron_log %}
+            <tr><td>{{ c.domain }}</td><td>{{ c.hook }}</td><td>{{ c.reason }}</td><td>{{ c.action }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    {% if result.db_users_log %}
+    <div class="box" style="border-color:#4a0f2a;">
+        <h2 style="color:#ff6699;">Usuarios de Base de Datos ({{ result.db_users_log|length }})</h2>
+        <table>
+            <thead><tr><th>Dominio</th><th>Usuario</th><th>Accion</th><th>Razon</th></tr></thead>
+            <tbody>
+            {% for u in result.db_users_log %}
+            <tr><td>{{ u.domain }}</td><td>{{ u.user }}</td><td>{{ u.action }}</td><td>{{ u.reason }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
     {% if result.cms_restore_log %}
     <div class="box">
         <h2>Restauracion CMS</h2>
         {% for e in result.cms_restore_log %}
         <div class="log-{{ e.type }}">[{{ e.cms|upper }}] {{ e.message }}</div>
         {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if manual_plugins %}
+    <div class="box" style="border-color:#4a2a0f;">
+        <h2 style="color:#ff8833;">Plugins sin restaurar — instalacion manual requerida ({{ manual_plugins|length }})</h2>
+        <p style="color:#8892b0; font-size:11px; margin-bottom:10px;">
+            Estos plugins no estan disponibles en <strong style="color:#c0c0c0;">wordpress.org</strong>
+            (probablemente premium o con licencia privada).
+            Deben instalarse manualmente desde el sitio oficial del desarrollador.
+            <strong style="color:#ff8833;">No reinstalar desde el backup original — puede contener malware.</strong>
+        </p>
+        <table>
+            <thead>
+                <tr><th>Plugin (slug)</th><th>Version instalada</th><th>Motivo</th></tr>
+            </thead>
+            <tbody>
+            {% for p in manual_plugins %}
+            <tr>
+                <td style="font-weight:600; white-space:nowrap;">{{ p.name }}</td>
+                <td style="color:#8892b0;">{{ p.version or 'desconocida' }}</td>
+                <td style="font-size:11px; color:#ffaa66;">{{ p.reason }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
     </div>
     {% endif %}
 
@@ -316,6 +406,31 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     </div>
     {% endif %}
 
+    {% if result.backups_isolated_log %}
+    <div class="box" style="border-color:#0f4a1a;">
+        <h2 style="color:#33ff77;">Backups Aislados ({{ result.backups_isolated_log|length }})</h2>
+        <p style="color:#8892b0; font-size:11px; margin-bottom:10px;">
+            Archivos y carpetas de backup detectados y aislados en <code>quarantine/backups/</code> antes del escaneo.
+            No se contabilizan como amenazas &mdash; son copias de seguridad del usuario.
+        </p>
+        <table>
+            <thead>
+                <tr><th>Nombre</th><th>Tipo</th><th>Ruta</th><th>Accion</th></tr>
+            </thead>
+            <tbody>
+            {% for b in result.backups_isolated_log %}
+            <tr>
+                <td style="font-weight:600; white-space:nowrap;">{{ b.name }}</td>
+                <td><span class="tag">{{ b.type }}</span></td>
+                <td style="font-size:11px; word-break:break-all; color:#8892b0;">{{ b.path }}</td>
+                <td><span style="color:#33ff77; font-weight:600;">aislado</span></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
     {% if result.virustotal_hits %}
     <div class="box">
         <h2>VirusTotal</h2>
@@ -340,6 +455,13 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
 </html>"""
 
 
+# URLs de la base de conocimiento (cambio de contrasenas)
+_KB_CPANEL = "https://hosting-ssd.com/hosting/index.php?rp=/knowledgebase/94/"
+_KB_WORDPRESS = "https://hosting-ssd.com/hosting/index.php?rp=/knowledgebase/18/"
+_KB_EMAIL = "https://hosting-ssd.com/hosting/index.php?rp=/knowledgebase/55/"
+_KB_SECURITY = "https://hosting-ssd.com/hosting/index.php?rp=/knowledgebase/90/"
+
+
 class ReportGenerator:
     def __init__(self, output_dir: str = None):
         self.output_dir = Path(output_dir) if output_dir else Path.cwd()
@@ -347,7 +469,7 @@ class ReportGenerator:
     @staticmethod
     def _filter_db_interventions(entries: list) -> tuple:
         """Filtra intervenciones de BD: solo mostrar registros con al menos
-        4 de 5 campos confirmados (archivo, tabla, post_id, detalle, fragmento).
+        3 de 4 campos confirmados (archivo, tabla, detalle, accion).
         Retorna (filtered_list, omitted_count, total_count).
         """
         if not entries:
@@ -355,24 +477,18 @@ class ReportGenerator:
 
         filtered = []
         for e in entries:
-            # Contar campos con datos reales (no vacios ni placeholder)
             fields_ok = 0
             if e.get("file", "").strip():
                 fields_ok += 1
             if e.get("table", "").strip():
                 fields_ok += 1
-            # post_id puede venir como int o string
-            post_id = e.get("post_id", "")
-            if post_id and str(post_id) not in ("", "0", "-"):
-                fields_ok += 1
             if e.get("detail", "").strip():
                 fields_ok += 1
-            # fragmento = action o context segun disponibilidad
             fragment = e.get("action", "") or e.get("context", "")
-            if fragment.strip():
+            if (fragment or "").strip():
                 fields_ok += 1
 
-            if fields_ok >= 4:
+            if fields_ok >= 3:
                 filtered.append(e)
 
         omitted = len(entries) - len(filtered)
@@ -388,9 +504,7 @@ class ReportGenerator:
         max_cat = max(result.summary_by_category.values(), default=1)
         confirmed_count = sum(1 for f in result.findings if f.confirmed_malware)
 
-        # v2.6.1: Filtrar intervenciones BD con umbral 4/5 campos
         db_log = getattr(result, "db_interventions_log", None) or []
-        # Excluir spam_posts del filtrado (tienen su propia seccion)
         db_log_no_spam = [e for e in db_log if e.get("type") != "spam_post"]
         db_filtered, db_omitted, db_total = self._filter_db_interventions(
             db_log_no_spam)
@@ -401,6 +515,9 @@ class ReportGenerator:
         env.filters["malware_ruta"] = malware_ruta
         template = env.from_string(REPORT_TEMPLATE)
 
+        restore_log = getattr(result, "cms_restore_log", None) or []
+        manual_plugins = [e for e in restore_log if e.get("type") == "manual_required"]
+
         html = template.render(
             result=result, findings_sorted=findings_sorted, confirmed_count=confirmed_count,
             generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -408,310 +525,339 @@ class ReportGenerator:
             db_interventions_filtered=db_filtered,
             db_interventions_omitted=db_omitted,
             db_interventions_total=db_total,
+            manual_plugins=manual_plugins,
         )
         output_path.write_text(html, encoding="utf-8")
         return str(output_path)
 
+    # ───────────────────────── Helpers PDF (v2.6.7) ──────────────────────────
+
+    @staticmethod
+    def _domains_from_result(result: ScanResult) -> list:
+        """Reune los dominios conocidos desde varias fuentes del resultado."""
+        domains = []
+        seen = set()
+
+        def _add(d):
+            d = (d or "").strip()
+            if d and d not in seen:
+                seen.add(d)
+                domains.append(d)
+
+        gp = getattr(result, "generated_passwords", None) or {}
+        for it in gp.get("wordpress", []) or []:
+            _add(it.get("domain"))
+        for u in getattr(result, "db_users_log", None) or []:
+            _add(u.get("domain"))
+        for c in getattr(result, "db_cron_log", None) or []:
+            _add(c.get("domain"))
+        for e in getattr(result, "plugins_temas_log", None) or []:
+            _add(e.get("domain"))
+        if not domains:
+            _add("principal")
+        return domains
+
+    @staticmethod
+    def _mc(pdf, h, text):
+        """multi_cell robusto: deja el cursor en el margen izquierdo (evita el
+        error 'Not enough horizontal space' por el new_x=RIGHT por defecto de fpdf2)."""
+        from fpdf.enums import XPos, YPos
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, h, ReportGenerator._safe_text(text),
+                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    def _pdf_section(self, pdf, title):
+        """Encabezado de seccion estandar."""
+        if pdf.get_y() > 250:
+            pdf.add_page()
+        pdf.ln(3)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.set_text_color(0, 51, 102)
+        self._mc(pdf, 8, title)
+        pdf.set_draw_color(0, 120, 200)
+        pdf.set_line_width(0.4)
+        y = pdf.get_y()
+        pdf.line(10, y, 200, y)
+        pdf.ln(3)
+        pdf.set_text_color(50, 50, 50)
+
+    def _pdf_paragraph(self, pdf, text, size=10):
+        pdf.set_font("Helvetica", "", size)
+        pdf.set_text_color(50, 50, 50)
+        self._mc(pdf, 5, text)
+        pdf.ln(1)
+
+    def _pdf_subhead(self, pdf, text):
+        """Subtitulo en negrita azul (7.1, categorias, Cobertura, etc.)."""
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(0, 51, 102)
+        self._mc(pdf, 6, text)
+        pdf.set_text_color(50, 50, 50)
+
     def generate_pdf(self, result: ScanResult, backup_path: str = "") -> str:
-        """PDF resumen para clientes — robusto con backups grandes, maximo 50 hallazgos."""
+        """PDF tipo 'Informe de limpieza' — estructura orientada al cliente (v2.6.7)."""
         from fpdf import FPDF
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pdf_path = self.output_dir / f"cpacleans_report_{timestamp}.pdf"
+        pdf_path = self.output_dir / f"cpacleans_informe_{timestamp}.pdf"
 
-        confirmed_count = sum(1 for f in result.findings if f.confirmed_malware)
-        suspect_count = result.total_threats_found - confirmed_count
+        # v2.6.8 Bug #3: consolidar rutas duplicadas — un registro representativo
+        # por archivo (varios hallazgos del mismo archivo se muestran una vez).
+        _sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        _by_path = {}
+        for f in result.findings:
+            if not f.confirmed_malware:
+                continue
+            key = f.file_path
+            prev = _by_path.get(key)
+            if prev is None or _sev_order.get(f.severity, 5) < _sev_order.get(prev.severity, 5):
+                _by_path[key] = f
+        confirmed = sorted(_by_path.values(),
+                           key=lambda f: _sev_order.get(f.severity, 5))
+        domains = self._domains_from_result(result)
 
         pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=20)
+        pdf.set_auto_page_break(auto=True, margin=18)
         pdf.add_page()
 
-        # -- Header --
-        pdf.set_fill_color(26, 26, 46)
-        pdf.rect(10, 10, 190, 30, "F")
-        pdf.set_font("Helvetica", "B", 20)
-        pdf.set_text_color(0, 212, 255)
-        pdf.set_xy(15, 14)
-        pdf.cell(0, 10, "cPacleanS - Reporte de Seguridad")
+        # ── Portada ──
+        pdf.set_fill_color(0, 51, 102)
+        pdf.rect(10, 10, 190, 26, "F")
+        pdf.set_font("Helvetica", "B", 19)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_xy(15, 16)
+        pdf.cell(0, 10, "INFORME DE LIMPIEZA")
         pdf.set_font("Helvetica", "", 9)
-        pdf.set_text_color(136, 146, 176)
-        pdf.set_xy(15, 26)
+        pdf.set_xy(15, 27)
         bname = Path(backup_path).name if backup_path else "N/A"
-        pdf.cell(0, 6, self._safe_text(f"{datetime.now().strftime('%Y-%m-%d %H:%M')}  |  {bname}  |  {result.total_files_scanned} archivos  |  {result.scan_duration_seconds}s"))
-
-        # -- Que encontramos --
-        pdf.set_xy(10, 48)
-        pdf.set_font("Helvetica", "B", 15)
-        pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 10, "Que encontramos")
-        pdf.ln(14)
-
-        pdf.set_font("Helvetica", "", 11)
+        pdf.cell(0, 6, self._safe_text(
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M')}  |  {bname}  |  "
+            f"{result.total_files_scanned} archivos analizados"))
+        pdf.ln(20)
         pdf.set_text_color(50, 50, 50)
-        lines = [
-            f"Se escanearon {result.total_files_scanned} archivos del backup.",
-            f"Se encontraron {result.total_threats_found} posibles amenazas.",
-            "",
-            f"   {confirmed_count} son MALWARE CONFIRMADO (virus, shells, backdoors).",
-            f"   {suspect_count} son sospechosos que requieren revision manual.",
-            f"   {result.total_cleaned} archivos fueron puestos en cuarentena.",
-        ]
-        if result.cms_detected:
-            lines.append("")
-            lines.append(f"CMS detectados: {', '.join(c.upper() for c in result.cms_detected)}.")
-            if getattr(result, "db_prefixes", None):
-                prefixes_str = ", ".join(f"{c.upper()}={p}" for c, p in result.db_prefixes.items())
-                lines.append(f"Prefijos BD: {prefixes_str}")
-        if result.clean_mode_used:
-            modes_es = {"normal": "Normal (solo confirmados)", "intermediate": "Intermedio", "strict": "Estricto (todo)"}
-            lines.append(f"Modo de limpieza: {modes_es.get(result.clean_mode_used, result.clean_mode_used)}.")
-        if getattr(result, "critical_only_mode", False) and getattr(result, "omitted_paths_count", 0) > 0:
-            lines.append("")
-            lines.append(f"Modo Solo Contenido Critico activo: {result.omitted_paths_count} archivos de")
-            lines.append("sistema omitidos (logs, ssl, bandwidth — cPanel los recrea al restaurar).")
-
-        for line in lines:
-            pdf.cell(0, 6, self._safe_text(line))
-            pdf.ln(6)
-
-        # -- Severidad --
-        pdf.ln(6)
-        pdf.set_font("Helvetica", "B", 13)
-        pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 10, "Nivel de riesgo")
-        pdf.ln(12)
-
-        colors = {"critical": (255, 68, 68), "high": (255, 136, 0), "medium": (255, 187, 51), "low": (0, 200, 81)}
-        labels_es = {"critical": "CRITICO - Malware activo", "high": "ALTO - Codigo peligroso", "medium": "MEDIO - Sospechoso", "low": "BAJO - Informativo"}
-
-        for sev in ["critical", "high", "medium", "low"]:
-            count = result.summary_by_severity.get(sev, 0)
-            if count > 0:
-                r, g, b = colors[sev]
-                pdf.set_font("Helvetica", "B", 11)
-                pdf.set_text_color(r, g, b)
-                pdf.cell(50, 7, f"  {labels_es[sev]}")
-                pdf.set_text_color(50, 50, 50)
-                pdf.set_font("Helvetica", "", 11)
-                pdf.cell(0, 7, f"  {count} detecciones")
-                pdf.ln(8)
-
-        # -- CMS Restauracion --
-        if result.cms_restore_log:
-            pdf.ln(4)
-            pdf.set_font("Helvetica", "B", 13)
-            pdf.set_text_color(0, 0, 0)
-            pdf.cell(0, 10, "Restauracion de CMS")
-            pdf.ln(12)
-            pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(50, 50, 50)
-            shown_cms = 0
-            for entry in result.cms_restore_log:
-                if shown_cms >= 30:
-                    pdf.cell(0, 5, self._safe_text(f"  ... y {len(result.cms_restore_log) - 30} entradas mas"))
-                    break
-                marker = {"success": "[OK]", "warning": "[!]", "error": "[X]", "info": "[i]"}.get(entry["type"], "[-]")
-                pdf.cell(0, 5, self._safe_text(f"  {marker} [{entry['cms'].upper()}] {entry['message'][:100]}"))
-                pdf.ln(5)
-                shown_cms += 1
-
-        # -- Intervenciones en BD (v2.6.1: filtro 4/5 campos) --
-        db_log_raw = getattr(result, "db_interventions_log", None) or []
-        db_log_no_spam_pdf = [e for e in db_log_raw if e.get("type") != "spam_post"]
-        db_log_pdf, db_omitted_pdf, db_total_pdf = self._filter_db_interventions(
-            db_log_no_spam_pdf)
-        if db_log_pdf:
-            pdf.ln(4)
-            pdf.set_font("Helvetica", "B", 13)
-            pdf.set_text_color(0, 0, 0)
-            title_suffix = f" de {db_total_pdf}" if db_omitted_pdf else ""
-            pdf.cell(0, 10, f"Intervenciones en Base de Datos ({len(db_log_pdf)}{title_suffix})")
-            pdf.ln(12)
-            pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(50, 50, 50)
-            pdf.cell(0, 5, "Solo se eliminan filas con malware CRITICO CONFIRMADO.")
-            pdf.ln(6)
-            if db_omitted_pdf:
-                pdf.cell(0, 5, self._safe_text(f"  {db_omitted_pdf} registros omitidos (datos insuficientes)."))
-                pdf.ln(5)
-            shown_db = 0
-            for entry in db_log_pdf:
-                if shown_db >= 30:
-                    pdf.cell(0, 5, self._safe_text(f"  ... y {len(db_log_pdf) - 30} entradas mas"))
-                    pdf.ln(5)
-                    break
-                e_type = entry.get("type", "")
-                marker = "[X]" if "deleted" in e_type or "removed" in e_type else "[?]"
-                table = entry.get("table", "?")
-                action = entry.get("action", "")[:60]
-                detail = entry.get("detail", "")[:80]
-                pdf.cell(0, 5, self._safe_text(f"  {marker} {table} | {action} | {detail}"))
-                pdf.ln(5)
-                shown_db += 1
-
-        # -- Plugins y Temas --
-        if getattr(result, "plugins_temas_log", None):
-            pdf.ln(4)
-            pdf.set_font("Helvetica", "B", 13)
-            pdf.set_text_color(0, 0, 0)
-            pdf.cell(0, 10, f"Plugins y Temas Removidos ({len(result.plugins_temas_log)})")
-            pdf.ln(12)
-            pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(50, 50, 50)
-            pdf.cell(0, 5, "Reinstalar SOLO desde repositorios oficiales del CMS.")
-            pdf.ln(6)
-            shown_pt = 0
-            for entry in result.plugins_temas_log:
-                if shown_pt >= 40:
-                    remaining_pt = len(result.plugins_temas_log) - 40
-                    pdf.cell(0, 5, self._safe_text(
-                        f"  ... y {remaining_pt} mas. Ver reporte HTML o REINSTALAR_PLUGINS.txt"))
-                    pdf.ln(5)
-                    break
-                ver = f" v{entry['version']}" if entry.get("version") != "desconocida" else ""
-                action = entry.get("action", "")
-                action_short = "cuarentena" if action == "cuarentena" else "eliminado" if action == "eliminado" else action[:20]
-                active_mark = "[A]" if entry.get("is_active") else "[-]"
-                ri = entry.get("reinstalled")
-                ri_mark = ""
-                if ri and isinstance(ri, dict):
-                    if ri.get("status") == "reinstalled":
-                        ri_mark = f" -> v{ri.get('version', '?')} (reinstalado)"
-                    elif ri.get("status") == "not_in_repo":
-                        ri_mark = " (no en repo)"
-                    elif ri.get("status") == "manual_required":
-                        ri_mark = " (manual)"
-                pdf.cell(0, 5, self._safe_text(
-                    f"  {active_mark} [{entry['cms'].upper()}] {entry['type']}: {entry['name']}{ver} -> {action_short}{ri_mark}"))
-                pdf.ln(5)
-                shown_pt += 1
-
-        # -- Archivos Residuales v2.6.0 --
-        junk_log = getattr(result, "junk_files_log", None)
-        if junk_log:
-            pdf.ln(4)
-            pdf.set_font("Helvetica", "B", 13)
-            pdf.set_text_color(0, 0, 0)
-            pdf.cell(0, 10, f"Archivos Residuales Eliminados ({len(junk_log)})")
-            pdf.ln(12)
-            pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(50, 50, 50)
-            shown_junk = 0
-            for entry in junk_log:
-                if shown_junk >= 30:
-                    pdf.cell(0, 5, self._safe_text(f"  ... y {len(junk_log) - 30} mas"))
-                    pdf.ln(5)
-                    break
-                action = entry.get("action", "logged_only")
-                marker = "[X]" if action in ("deleted", "quarantined") else "[i]"
-                path = entry.get("path", "?")[:80]
-                cat = entry.get("category", "")
-                pdf.cell(0, 5, self._safe_text(f"  {marker} {cat}: {path} -> {action}"))
-                pdf.ln(5)
-                shown_junk += 1
-
-        # -- Posts SPAM v2.6.0 --
-        spam_log = getattr(result, "spam_posts_log", None)
-        if spam_log:
-            pdf.ln(4)
-            pdf.set_font("Helvetica", "B", 13)
-            pdf.set_text_color(0, 0, 0)
-            pdf.cell(0, 10, f"Posts SPAM Detectados ({len(spam_log)})")
-            pdf.ln(12)
-            pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(50, 50, 50)
-            shown_spam = 0
-            for entry in spam_log:
-                if shown_spam >= 20:
-                    pdf.cell(0, 5, self._safe_text(f"  ... y {len(spam_log) - 20} mas"))
-                    pdf.ln(5)
-                    break
-                action = entry.get("action", "logged_only")
-                marker = "[X]" if action == "deleted" else "[?]"
-                title = entry.get("title_preview", "?")[:50]
-                score = entry.get("score", 0)
-                pdf.cell(0, 5, self._safe_text(f"  {marker} ID:{entry.get('post_id',0)} score:{score} \"{title}\" -> {action}"))
-                pdf.ln(5)
-                shown_spam += 1
-
-        # -- Top hallazgos --
-        pdf.add_page()
-        pdf.set_font("Helvetica", "B", 13)
-        pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 10, "Principales hallazgos")
-        pdf.ln(12)
-
-        severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-        sorted_findings = sorted(result.findings, key=lambda f: severity_order.get(f.severity, 5))
-
-        pdf.set_font("Helvetica", "B", 8)
-        pdf.set_fill_color(230, 230, 230)
-        pdf.cell(18, 6, "Riesgo", 1, fill=True)
-        pdf.cell(12, 6, "Score", 1, fill=True)
-        pdf.cell(15, 6, "Tipo", 1, fill=True)
-        pdf.cell(40, 6, "Archivo", 1, fill=True)
-        pdf.cell(0, 6, "Que se encontro", 1, fill=True)
-        pdf.ln(6)
-
-        MAX_PDF_ROWS = 50
-        pdf.set_font("Helvetica", "", 7)
-        shown = 0
-        for f in sorted_findings:
-            if shown >= MAX_PDF_ROWS:
-                break
-            fname = Path(f.file_path).name
-            if len(fname) > 25:
-                fname = fname[:22] + "..."
-            tipo = "MALWARE" if f.confirmed_malware else "Sospec."
-            desc = f.description
-            if len(desc) > 60:
-                desc = desc[:57] + "..."
-            r, g, b = colors.get(f.severity, (100, 100, 100))
-            pdf.set_text_color(r, g, b)
-            pdf.cell(18, 5, f.severity.upper(), 1)
-            pdf.set_text_color(50, 50, 50)
-            pdf.cell(12, 5, str(getattr(f, 'confidence_score', 0)), 1)
-            pdf.cell(15, 5, tipo, 1)
-            pdf.cell(40, 5, self._safe_text(fname), 1)
-            pdf.cell(0, 5, self._safe_text(desc), 1)
-            pdf.ln(5)
-            shown += 1
-
-        remaining = len(sorted_findings) - MAX_PDF_ROWS
-        if remaining > 0:
-            pdf.ln(3)
-            pdf.set_font("Helvetica", "I", 8)
-            pdf.set_text_color(120, 120, 120)
-            pdf.cell(0, 6, f"  ... y {remaining} hallazgos mas. Ver reporte HTML completo para la lista detallada.")
-
-        # -- Recomendaciones --
-        pdf.ln(10)
-        pdf.set_font("Helvetica", "B", 13)
-        pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 10, "Que significa esto")
-        pdf.ln(12)
         pdf.set_font("Helvetica", "", 10)
-        pdf.set_text_color(50, 50, 50)
-        recs = [
-            "CONFIRMADO = Archivos que contienen virus, shells o codigo malicioso comprobado.",
-            "Sospechoso = Patrones inusuales que pueden ser legitimos o maliciosos.",
-            "",
-            "Los archivos confirmados fueron puestos en cuarentena (copia de seguridad guardada).",
-            "Los archivos sospechosos NO fueron modificados, solo se reportan.",
-            "",
-            "RECOMENDACIONES:",
-            "  1. Revisar los archivos sospechosos con un desarrollador.",
-            "  2. Cambiar todas las contrasenas (cPanel, FTP, DB, email).",
-            "  3. Actualizar WordPress, plugins y temas a la ultima version.",
-            "  4. Instalar un firewall (Wordfence, Sucuri) en el nuevo sitio.",
-        ]
-        for r in recs:
-            pdf.cell(0, 6, self._safe_text(r))
-            pdf.ln(6)
+        cms_str = ", ".join(c.upper() for c in result.cms_detected) if result.cms_detected else "N/D"
+        self._mc(pdf, 5,
+            f"Se completó la limpieza de seguridad de la cuenta de hosting. "
+            f"CMS detectados: {cms_str}. Dominios: {', '.join(domains)}.")
+        pdf.ln(2)
 
-        # -- Footer --
-        pdf.set_y(-20)
+        # ── 1. Malware encontrado + 2. Ruta de archivos infectados ──
+        self._pdf_section(pdf, "1. Malware encontrado y rutas de archivos infectados")
+        if confirmed:
+            self._pdf_paragraph(pdf,
+                f"Se detectaron {len(confirmed)} archivos con malware confirmado "
+                "(rutas consolidadas, una por archivo). Se incluye la ruta original "
+                "de cada archivo infectado:")
+            pdf.set_font("Helvetica", "B", 8)
+            pdf.set_fill_color(230, 230, 230)
+            pdf.cell(16, 6, "Riesgo", 1, fill=True)
+            pdf.cell(45, 6, "Archivo", 1, fill=True)
+            pdf.cell(0, 6, "Ruta original", 1, fill=True)
+            pdf.ln(6)
+            pdf.set_font("Helvetica", "", 7)
+            for f in confirmed[:60]:
+                fname = Path(f.file_path).name
+                if len(fname) > 26:
+                    fname = fname[:23] + "..."
+                ruta = malware_ruta(f.file_path)
+                if len(ruta) > 80:
+                    ruta = "..." + ruta[-77:]
+                pdf.cell(16, 5, self._safe_text(f.severity.upper()[:6]), 1)
+                pdf.cell(45, 5, self._safe_text(fname), 1)
+                pdf.cell(0, 5, self._safe_text(ruta), 1)
+                pdf.ln(5)
+            if len(confirmed) > 60:
+                self._pdf_paragraph(pdf, f"... y {len(confirmed) - 60} archivos más (ver reporte HTML).", 8)
+        else:
+            self._pdf_paragraph(pdf, "No se encontraron archivos con malware confirmado.")
+
+        # ── 2. Plugins con malware / no instalados ──
+        self._pdf_section(pdf, "2. Plugins con malware / no instalados")
+        restore_log = getattr(result, "cms_restore_log", None) or []
+        manual_plugins = [e for e in restore_log if e.get("type") == "manual_required"]
+        pt_log = getattr(result, "plugins_temas_log", None) or []
+        plugin_rows = []
+        for e in manual_plugins:
+            plugin_rows.append({
+                "domain": e.get("domain", "-"),
+                "name": e.get("name", "-"),
+                "author": e.get("author", "-"),
+                "reason": e.get("reason", "no disponible en wordpress.org"),
+            })
+        for e in pt_log:
+            if e.get("type") == "plugin" and e.get("reinstalled", {}) and \
+                    e["reinstalled"].get("status") in ("not_in_repo", "manual_required"):
+                plugin_rows.append({
+                    "domain": e.get("domain", "-"),
+                    "name": e.get("name", "-"),
+                    "author": e.get("author", "-"),
+                    "reason": "no disponible en repositorio oficial",
+                })
+        if plugin_rows:
+            pdf.set_font("Helvetica", "B", 8)
+            pdf.set_fill_color(230, 230, 230)
+            pdf.cell(38, 6, "Dominio", 1, fill=True)
+            pdf.cell(50, 6, "Plugin", 1, fill=True)
+            pdf.cell(42, 6, "Autor", 1, fill=True)
+            pdf.cell(0, 6, "Razón", 1, fill=True)
+            pdf.ln(6)
+            pdf.set_font("Helvetica", "", 7)
+            for r in plugin_rows[:50]:
+                pdf.cell(38, 5, self._safe_text(str(r["domain"])[:22]), 1)
+                pdf.cell(50, 5, self._safe_text(str(r["name"])[:30]), 1)
+                pdf.cell(42, 5, self._safe_text(str(r["author"])[:24]), 1)
+                pdf.cell(0, 5, self._safe_text(str(r["reason"])[:40]), 1)
+                pdf.ln(5)
+        else:
+            self._pdf_paragraph(pdf, "No hay plugins con malware ni plugins pendientes de instalación manual.")
+
+        # ── 3. Entradas y comentarios extraños por dominio ──
+        self._pdf_section(pdf, "3. Entradas y comentarios extraños en WordPress")
+        spam_log = getattr(result, "spam_posts_log", None) or []
+        if spam_log:
+            self._pdf_paragraph(pdf,
+                f"Se detectaron {len(spam_log)} publicaciones/comentarios con contenido "
+                "extraño (SPAM/malware inyectado):")
+            pdf.set_font("Helvetica", "", 7)
+            for s in spam_log[:30]:
+                title = (s.get("title_preview", "") or "")[:60]
+                kind = s.get("kind", "entrada")
+                self._mc(pdf, 5,
+                    f"  - {kind} ID {s.get('post_id', '?')} (score {s.get('score', 0)}): {title} -> {s.get('action', '')}")
+            if len(spam_log) > 30:
+                self._pdf_paragraph(pdf, f"... y {len(spam_log) - 30} más.", 8)
+        else:
+            self._pdf_paragraph(pdf, "No se encontraron entradas ni comentarios extraños.")
+        for d in domains:
+            self._pdf_paragraph(pdf,
+                f"Dominio {d}: se desmarcó la opción de 'permitir avisos de enlaces de otros "
+                "blogs (pingbacks y trackbacks) en las nuevas entradas'.", 9)
+
+        # ── 4. Usuarios extraños por dominio ──
+        self._pdf_section(pdf, "4. Usuarios extraños detectados")
+        users_log = getattr(result, "db_users_log", None) or []
+        dangerous_users = [u for u in users_log if "eliminado" in u.get("action", "") or "peligroso" in u.get("action", "")]
+        if dangerous_users:
+            pdf.set_font("Helvetica", "B", 8)
+            pdf.set_fill_color(230, 230, 230)
+            pdf.cell(45, 6, "Dominio", 1, fill=True)
+            pdf.cell(55, 6, "Usuario", 1, fill=True)
+            pdf.cell(0, 6, "Acción", 1, fill=True)
+            pdf.ln(6)
+            pdf.set_font("Helvetica", "", 7)
+            for u in dangerous_users[:40]:
+                pdf.cell(45, 5, self._safe_text(str(u.get("domain", "-"))[:26]), 1)
+                pdf.cell(55, 5, self._safe_text(str(u.get("user", "-"))[:32]), 1)
+                pdf.cell(0, 5, self._safe_text(str(u.get("action", "-"))[:45]), 1)
+                pdf.ln(5)
+        else:
+            for d in domains:
+                self._pdf_paragraph(pdf, f"Dominio {d}: no se encontraron usuarios extraños.", 9)
+
+        # ── 5. Contraseñas generadas ──
+        self._pdf_section(pdf, "5. Contraseñas generadas (cPanel, WordPress, base de datos)")
+        self._pdf_paragraph(pdf,
+            "Nota: cambiar por otra propia cuando pueda ingresar. Se generaron como medida "
+            "preventiva; permiten comprobar que se siguen las recomendaciones de seguridad.")
+        gp = getattr(result, "generated_passwords", None) or {}
+        cat_labels = {"cpanel": "cPanel", "wordpress": "WordPress",
+                      "database": "Base de datos"}
+        any_pwd = False
+        for cat in ("cpanel", "wordpress", "database"):
+            items = gp.get(cat, []) or []
+            if not items:
+                continue
+            any_pwd = True
+            self._pdf_subhead(pdf, cat_labels[cat] + ":")
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(50, 50, 50)
+            for it in items:
+                ident = it.get("domain") or it.get("db") or "-"
+                user = it.get("user", "")
+                pwd = it.get("pass", "")
+                self._mc(pdf, 5,
+                    f"   {ident}  |  usuario: {user}  |  contraseña: {pwd}")
+            pdf.ln(1)
+        if not any_pwd:
+            self._pdf_paragraph(pdf, "No se generaron contraseñas en esta ejecución.")
+
+        # ── 6b. Correos que requieren cambio manual (Mejora v2.6.8: NO se cambian
+        #         automáticamente — solo se listan) ──
+        emails = gp.get("emails", []) or []
+        self._pdf_subhead(pdf, "Correos que requieren cambio manual de contraseña:")
+        if emails:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(50, 50, 50)
+            for it in emails:
+                addr = it.get("email") or "-"
+                self._mc(pdf, 5, f"   {addr}  ->  cambiar contraseña manualmente desde cPanel")
+        else:
+            self._pdf_paragraph(pdf,
+                "Cambiar manualmente la contraseña de todas las cuentas de correo corporativo "
+                "desde cPanel. La herramienta no modifica contraseñas de correo automáticamente.", 9)
+
+        # ── 6. Observaciones adicionales ──
+        self._pdf_section(pdf, "6. Observaciones adicionales")
+        obs = []
+        obs.append("Se eliminaron archivos de tamaño 0 (0 KB).")
+        obs.append("Se actualizó el archivo .htaccess para fortalecer la seguridad del servidor "
+                   "y prevenir accesos no autorizados o ataques comunes.")
+        obs.append("Se instalaron plugins de seguridad provenientes del repositorio oficial de WordPress.")
+        if getattr(result, "db_cron_log", None):
+            obs.append(f"Se comentaron/neutralizaron {len(result.db_cron_log)} eventos de cron maliciosos en la base de datos.")
+        if getattr(result, "db_very_infected", False):
+            obs.append("La base de datos presentaba un nivel alto de infección; se realizó limpieza profunda de filas maliciosas.")
+        for o in obs:
+            self._pdf_paragraph(pdf, f"- {o}", 10)
+
+        # ── 7. Recomendaciones ──
+        self._pdf_section(pdf, "7. Recomendaciones según lo encontrado")
+        self._pdf_paragraph(pdf,
+            "Desde ahora se desactiva la opción de 'permitir enlaces de notificaciones desde otros "
+            "blogs (pingbacks y trackbacks)'. Asimismo, se desactiva el archivo xmlrpc.php de todas "
+            "las páginas a nuestro cargo, debido a reportes internacionales de uso del servidor "
+            "para atacar a terceros.")
+        self._pdf_subhead(pdf, "7.1 Cambio de contraseñas")
+        self._pdf_paragraph(pdf,
+            "Se realizó el cambio de contraseñas como medida preventiva. Esta acción también "
+            "permite comprobar si el cliente sigue las recomendaciones de seguridad indicadas.")
+        self._pdf_subhead(pdf, "7.2 Plugins no instalados")
+        self._pdf_paragraph(pdf,
+            "Algunos plugins no se instalaron porque no son compatibles con la versión actual del "
+            "sistema o no están actualizados, lo que podría representar un riesgo de seguridad o "
+            "inestabilidad en el funcionamiento.")
+        self._pdf_subhead(pdf, "7.3 Implementar CAPTCHA")
+        self._pdf_paragraph(pdf,
+            "Para fortalecer la seguridad de los formularios del sitio, se recomienda instalar un "
+            "sistema CAPTCHA que previene el envío automatizado de spam y accesos maliciosos por bots.")
+
+        # ── 8. Garantía ──
+        self._pdf_section(pdf, "8. Garantía de 30 días post-limpieza")
+        self._pdf_subhead(pdf, "Cobertura")
+        self._pdf_paragraph(pdf,
+            "Ofrecemos una garantía de 30 días posteriores a la limpieza. En el improbable caso de "
+            "reinfección, realizaremos una nueva limpieza gratuita para asegurar el correcto "
+            "funcionamiento de su sistema.")
+        self._pdf_subhead(pdf, "Condiciones")
+        self._pdf_paragraph(pdf,
+            "La garantía aplica únicamente si: se siguen todas las recomendaciones de seguridad "
+            "proporcionadas por nuestro equipo; y no se instalan plugins/themes/modificaciones no "
+            "verificados durante este período.")
+        self._pdf_subhead(pdf, "Excepciones")
+        self._pdf_paragraph(pdf,
+            "Reinfecciones causadas por acciones externas no vinculadas al servicio original "
+            "(por ejemplo: contraseñas débiles, acceso de terceros no autorizados).")
+        self._pdf_paragraph(pdf,
+            "Por seguridad debe cambiar las contraseñas de cPanel, WordPress y correos corporativos:")
+        self._pdf_paragraph(pdf, f"  - cPanel: {_KB_CPANEL}", 8)
+        self._pdf_paragraph(pdf, f"  - WordPress: {_KB_WORDPRESS}", 8)
+        self._pdf_paragraph(pdf, f"  - Correos corporativos: {_KB_EMAIL}", 8)
+        self._pdf_paragraph(pdf, f"  - Recomendaciones de seguridad: {_KB_SECURITY}", 8)
+
+        # ── Footer ──
+        pdf.set_y(-15)
         pdf.set_font("Helvetica", "I", 7)
         pdf.set_text_color(150, 150, 150)
         pdf.cell(0, 8, f"cPacleanS v{APP_VERSION} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", align="C")
@@ -719,7 +865,27 @@ class ReportGenerator:
         pdf.output(str(pdf_path))
         return str(pdf_path)
 
+    # v2.6.8: mapa de caracteres Unicode comunes a equivalentes latin-1 imprimibles
+    # (fpdf2 con fuentes core usa latin-1; las tildes y ñ SI estan en latin-1, pero
+    #  guiones largos, comillas tipograficas, vinetas, flechas, etc. NO).
+    _UNICODE_MAP = {
+        "–": "-", "—": "-", "−": "-",      # – — −
+        "‘": "'", "’": "'", "‚": "'",       # ‘ ’ ‚
+        "“": '"', "”": '"', "„": '"',       # “ ” „
+        "…": "...",                                    # …
+        "•": "-", "●": "-", "·": "-",        # • ● ·
+        "→": "->", "←": "<-", "⇒": "=>",     # → ← ⇒
+        "✅": "[OK]", "✔": "[OK]", "❌": "[X]", # ✅ ✔ ❌
+        "‘": "'", " ": " ",                        # nbsp
+    }
+
     @staticmethod
     def _safe_text(text: str) -> str:
-        """Reemplaza caracteres que fpdf2 no puede codificar en latin-1."""
+        """Prepara texto para fpdf2 (latin-1): conserva tildes/ñ y traduce los
+        caracteres Unicode no representables en latin-1 a equivalentes legibles."""
+        if text is None:
+            return ""
+        for uni, repl in ReportGenerator._UNICODE_MAP.items():
+            if uni in text:
+                text = text.replace(uni, repl)
         return text.encode("latin-1", errors="replace").decode("latin-1")

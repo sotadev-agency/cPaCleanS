@@ -1,4 +1,4 @@
-"""Separador de plugins y temas de CMS — v2.3.0.
+"""Separador de plugins y temas de CMS — v2.6.4.
 
 Flujo por modo (Normal, Intermedio, Estricto):
   1. Leer BD del CMS -> detectar prefijo real -> identificar plugins/temas ACTIVOS
@@ -17,6 +17,7 @@ from typing import Callable
 
 import requests
 
+from ..config.settings import APP_VERSION
 from ..utils.db_utils import (
     detect_prefix_from_config, detect_prefix_from_dump, read_active_from_dump,
 )
@@ -50,7 +51,7 @@ CMS_ADDON_PATHS = {
 }
 
 _CMS_ROOT_MARKERS = {
-    "wordpress": ("wp-config.php",   "wp-includes"),
+    "wordpress": ("wp-config.php",   "wp-content"),
     "joomla":    ("configuration.php", "administrator"),
     "moodle":    ("config.php",       "lib"),
     "ojs":       ("config.inc.php",   "lib"),
@@ -159,7 +160,8 @@ class CMSPluginCleaner:
 
     def process(self, cms_detected: list) -> dict:
         """Procesa todos los CMS detectados. Retorna conteos por CMS."""
-        dest_base = self.quarantine_dir / "plugins_temas"
+        # v2.6.2: estructura unificada — era "plugins_temas", ahora "cms_components"
+        dest_base = self.quarantine_dir / "cms_components"
         dest_base.mkdir(parents=True, exist_ok=True)
 
         counts = {"total": 0, "by_cms": {}}
@@ -270,6 +272,43 @@ class CMSPluginCleaner:
         count = 0
         detector = _VERSION_DETECTORS.get(cms, {}).get(addon_type)
         is_active_set = self._get_active_set(cms, addon_type, active)
+
+        # v2.6.4: si el directorio ya fue vaciado por otro modulo (ej. WordPressCleaner),
+        # registrar los activos conocidos y pasar directo a reinstalacion
+        if not items and is_active_set:
+            self.progress_callback("status",
+                f"[{cms.upper()}] {addon_type}: directorio ya vaciado, restaurando {len(is_active_set)} activos...")
+            to_reinstall = []
+            for slug in sorted(is_active_set):
+                entry = {
+                    "cms": cms, "type": addon_type, "name": slug, "version": "",
+                    "original_path": str(addon_dir / slug), "is_active": True,
+                    "action": "pre-vaciado",
+                }
+                self.removal_log.append(entry)
+                to_reinstall.append((entry, slug, ""))
+                count += 1
+            if to_reinstall:
+                from concurrent.futures import ThreadPoolExecutor, as_completed as _ac
+                total = len(to_reinstall)
+
+                def _do_reinstall_pre(args):
+                    _, slug, ver = args
+                    return self._reinstall_from_repo(cms, addon_type, slug, addon_dir, ver)
+
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    futs = {pool.submit(_do_reinstall_pre, a): a for a in to_reinstall}
+                    done = 0
+                    for fut in _ac(futs):
+                        done += 1
+                        self.progress_callback("status",
+                            f"[{cms.upper()}] Reinstalando {done} de {total}...")
+                        entry, slug, _ = futs[fut]
+                        reinstalled = fut.result()
+                        entry["reinstalled"] = reinstalled
+                        if reinstalled:
+                            entry["reinstalled_version"] = reinstalled.get("version", "")
+            return count
 
         # Fase 1: cuarentena/eliminacion secuencial + recolectar activos
         to_reinstall = []
@@ -514,7 +553,7 @@ class CMSPluginCleaner:
 
     def _write_reinstall_guide(self, dest_base: Path):
         lines = [
-            "=== cPacleanS v2.3.0 — Plugins y Temas Removidos ===",
+            f"=== cPacleanS v{APP_VERSION} — Plugins y Temas Removidos ===",
             "",
             "IMPORTANTE: Reinstalar SOLO desde repositorios oficiales del CMS.",
             "No reutilizar los archivos originales — pueden contener malware.",
@@ -561,7 +600,8 @@ class CMSPluginCleaner:
                     lines.append(f"  [-] [{e['type']}] {e['name']}{ver} -> {e.get('action', '?')}")
                 lines.append("")
 
-        guide_path = dest_base / "REINSTALAR_PLUGINS.txt"
+        # v2.6.2: guia en la raiz de la cuarentena para mayor visibilidad
+        guide_path = self.quarantine_dir / "REINSTALAR_PLUGINS.txt"
         try:
             guide_path.write_text("\n".join(lines), encoding="utf-8")
         except (OSError, PermissionError):

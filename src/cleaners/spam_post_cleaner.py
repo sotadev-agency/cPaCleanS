@@ -15,11 +15,27 @@ class SpamPostCleaner:
     """Analiza y marca posts SPAM para eliminacion en dumps WP."""
 
     # Tipos de post que NUNCA se tocan — proteccion absoluta
+    # v3.0.0: agregados tipos de WooCommerce, ACF, builders y membresías
     SAFE_POST_TYPES = frozenset([
         "page", "attachment", "nav_menu_item", "revision",
         "custom_css", "customize_changeset", "oembed_cache",
         "user_request", "wp_block", "wp_template", "wp_template_part",
         "wp_navigation", "wp_font_face", "wp_font_family",
+        # WooCommerce
+        "product", "product_variation", "shop_order", "shop_coupon",
+        "shop_order_refund", "shop_webhook",
+        # ACF (Advanced Custom Fields)
+        "acf-field", "acf-field-group",
+        # Page builders
+        "elementor_library", "elementor_font", "elementor_icons",
+        "fl-builder-template", "et_pb_layout",
+        # Formularios
+        "wpcf7_contact_form", "wpforms", "gf_form",
+        # Membresías / LMS
+        "pmpro_membership_level", "sfwd-courses", "sfwd-lessons",
+        "llms_course", "llms_lesson",
+        # Otros de confianza
+        "acf-taxonomy", "tribe_events", "tribe_venue",
     ])
 
     # Tablas relacionadas a limpiar en cascada tras eliminar posts
@@ -28,10 +44,19 @@ class SpamPostCleaner:
     # Regex para URLs externas en contenido
     _URL_RE = re.compile(r'href\s*=\s*["\']https?://[^"\']+["\']', re.IGNORECASE)
 
+    # v2.6.8: indicadores de phishing en comentarios
+    _PHISHING_HINTS = re.compile(
+        r"(verify your account|confirm your password|login to claim|"
+        r"bit\.ly|tinyurl|t\.me/|wa\.me/|telegram|whatsapp \+|"
+        r"viagra|cialis|casino|porn|sex|loan|bitcoin|crypto wallet|seed phrase)",
+        re.IGNORECASE,
+    )
+
     def __init__(self, prefix: str, clean_mode: str):
         self.prefix = prefix
         self.clean_mode = clean_mode
         self.spam_log: list[dict] = []
+        self._comment_delete_ids: list[int] = []  # v2.6.8
 
     def analyze_rows(self, rows: list[dict]) -> "SpamPostCleaner":
         """Analiza filas de {prefix}posts y popula spam_log.
@@ -89,11 +114,77 @@ class SpamPostCleaner:
 
         return self
 
+    def analyze_comment_rows(self, rows: list[dict]) -> "SpamPostCleaner":
+        """v2.6.8: analiza filas de {prefix}comments y marca spam/phishing.
+        rows: dicts con comment_ID, comment_content, comment_author_url,
+              comment_approved."""
+        for row in rows:
+            cid = row.get("comment_ID", 0)
+            content = row.get("comment_content", "") or ""
+            author_url = row.get("comment_author_url", "") or ""
+            approved = str(row.get("comment_approved", "")).strip().lower()
+
+            score, reasons = self._score_comment(content, author_url)
+            if approved == "spam":            # ya marcado spam por WP/Akismet
+                score = max(score, 100)
+                reasons.append("marked_spam")
+            if score <= 0:
+                continue
+
+            entry = {
+                "post_id": cid,
+                "title_preview": content[:60],
+                "score": score,
+                "reasons": reasons,
+                "type": "spam_post",
+                "kind": "comentario",
+                "action": "logged_only",
+            }
+            if self.clean_mode == SCAN_MODE_ONLY:
+                self.spam_log.append(entry)
+                continue
+            if score < SPAM_SCORE_THRESHOLD:
+                entry["action"] = "suspect_not_deleted"
+                self.spam_log.append(entry)
+                continue
+            entry["action"] = "deleted"
+            if cid:
+                self._comment_delete_ids.append(cid)
+            self.spam_log.append(entry)
+        return self
+
+    def _score_comment(self, content: str, author_url: str) -> tuple[int, list[str]]:
+        score = 0
+        reasons = []
+        if self._detect_non_latin_script(content):
+            score += 35
+            reasons.append("non_latin_script")
+        all_urls = re.findall(r'https?://[^\s<>"\']{5,}', content)
+        if len(all_urls) >= 2:
+            score += 25
+            reasons.append(f"links_{len(all_urls)}")
+        if author_url and len(author_url) > 5:
+            score += 10
+            reasons.append("author_url")
+        if self._PHISHING_HINTS.search(content):
+            score += 40
+            reasons.append("phishing_keywords")
+        text_lower = content.lower()
+        for cat_name, keywords in SPAM_KEYWORDS.items():
+            if sum(1 for kw in keywords if kw.lower() in text_lower) >= 2:
+                score += 15
+                reasons.append(f"{cat_name}")
+        return min(score, 100), reasons
+
+    def get_comment_delete_ids(self) -> list[int]:
+        return list(self._comment_delete_ids)
+
     def get_delete_ids(self) -> list[int]:
         """IDs con accion 'deleted' que pasaron todas las reglas."""
         return [
             e["post_id"] for e in self.spam_log
             if e.get("action") == "deleted" and e.get("post_id")
+            and e.get("kind") != "comentario"
         ]
 
     def get_cascade_deletes(self, deleted_ids: list[int]) -> dict[str, list]:
@@ -184,6 +275,15 @@ class SpamPostCleaner:
                 non_latin += 1
             # Thai
             elif 0x0E00 <= cp <= 0x0E7F:
+                non_latin += 1
+            # Devanagari (Hindi, Marathi, etc.)
+            elif 0x0900 <= cp <= 0x097F:
+                non_latin += 1
+            # Hebrew
+            elif 0x0590 <= cp <= 0x05FF:
+                non_latin += 1
+            # Bengali
+            elif 0x0980 <= cp <= 0x09FF:
                 non_latin += 1
 
         if total_alpha < 10:
