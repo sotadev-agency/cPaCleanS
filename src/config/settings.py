@@ -137,7 +137,11 @@ TRUSTED_EMAIL_DOMAINS = frozenset({
 })
 
 # ── v2.6.0: Spam post scoring ──
-SPAM_SCORE_THRESHOLD = 65
+# v3.2: bajado de 65 -> 50. Con 65 el spam en script latino (inglés/español:
+# gambling/pharma/adult) sumaba ~40-55 y quedaba sin eliminar. Los post_types
+# seguros (páginas, productos WooCommerce, ACF, builders) están protegidos por
+# SAFE_POST_TYPES, así que un umbral más bajo es seguro y elimina más spam real.
+SPAM_SCORE_THRESHOLD = 50
 
 SPAM_KEYWORDS = {
     "gambling": [

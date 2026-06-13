@@ -574,6 +574,9 @@ class CpacleanSApp(ctk.CTk):
             info = self._backup_info
             self._safe_result(f"Extraído: {info.total_files} archivos, {info.total_size_mb} MB")
             self._safe_detail(f"Usuario cPanel: {info.cpanel_user or 'N/A'}")
+            if info.main_domain:
+                self._safe_detail(f"Dominio principal: {info.main_domain}"
+                                  + (f" (+{len(info.all_domains) - 1} más)" if len(info.all_domains) > 1 else ""))
             self._safe_detail(f"MySQL: {'Sí' if info.has_mysql else 'No'}  |  Email: {'Sí' if info.has_email else 'No'}")
             if info.cms_detected:
                 self._safe_detail(f"CMS detectados: {', '.join(c.upper() for c in info.cms_detected)}")
@@ -607,6 +610,8 @@ class CpacleanSApp(ctk.CTk):
             self._safe_phase(3, "Escaneo de malware (multiprocessing)")
             self._safe_status("Escaneando archivos...")
             result = engine.scan_directory(info.extract_dir, backup_info=info, critical_only=critical_only)
+            result.main_domain = info.main_domain
+            result.all_domains = list(info.all_domains)
             self._scan_result = result
 
             confirmed = sum(1 for f in result.findings if f.confirmed_malware)
@@ -832,8 +837,8 @@ class CpacleanSApp(ctk.CTk):
                     if pt_counts["total"] > 0:
                         self._safe_result(f"Plugins/temas procesados: {pt_counts['total']}")
 
-                # JunkCleaner
-                if info.cms_detected and result.quarantine_dir:
+                # JunkCleaner — v3.2: corre también sin CMS (proyectos de código propio)
+                if result.quarantine_dir:
                     self._safe_status("Limpiando archivos residuales...")
                     junk_cleaner = JunkCleaner(
                         extract_dir=info.extract_dir,
@@ -845,7 +850,12 @@ class CpacleanSApp(ctk.CTk):
                     result.junk_files_log = junk_log
                     if junk_log:
                         acted = sum(1 for j in junk_log if j["action"] != "logged_only")
+                        by_cat = {}
+                        for j in junk_log:
+                            by_cat[j["category"]] = by_cat.get(j["category"], 0) + 1
                         self._safe_result(f"Residuales: {len(junk_log)} encontrados, {acted} procesados")
+                        for cat, n in sorted(by_cat.items(), key=lambda x: -x[1])[:6]:
+                            self._safe_detail(f"  {cat}: {n}")
 
                 # DBCleaner
                 if db_paths and info.cms_detected and result.quarantine_dir:

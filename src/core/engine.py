@@ -103,6 +103,9 @@ class ScanResult:
     db_very_infected: bool = False
     # v3.1 — indicadores de compromiso extraídos de findings
     iocs: dict = field(default_factory=dict)   # {"ips": [...], "urls": [...], "domains": [...]}
+    # v3.2 — dominio principal del hosting (de userdata/main) y todos los dominios
+    main_domain: str = ""
+    all_domains: list = field(default_factory=list)
 
 
 # --- Multiprocessing worker con scanners persistentes por proceso ---

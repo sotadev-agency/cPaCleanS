@@ -44,6 +44,15 @@ class SpamPostCleaner:
     # Regex para URLs externas en contenido
     _URL_RE = re.compile(r'href\s*=\s*["\']https?://[^"\']+["\']', re.IGNORECASE)
 
+    # v3.2: enlaces ocultos / SEO spam inyectado (display:none, posicionado fuera
+    # de pantalla, visibility:hidden, o spans/divs ocultos con enlaces).
+    _HIDDEN_LINK_RE = re.compile(
+        r'(display\s*:\s*none|visibility\s*:\s*hidden|'
+        r'position\s*:\s*absolute[^>]*(top|left)\s*:\s*-\d{3,}|'
+        r'text-indent\s*:\s*-\d{3,}|height\s*:\s*0(px|;|\s)|'
+        r'font-size\s*:\s*0(px|;|\s))',
+        re.IGNORECASE)
+
     # v2.6.8: indicadores de phishing en comentarios
     _PHISHING_HINTS = re.compile(
         r"(verify your account|confirm your password|login to claim|"
@@ -157,14 +166,18 @@ class SpamPostCleaner:
         score = 0
         reasons = []
         if self._detect_non_latin_script(content):
-            score += 35
+            score += 40
             reasons.append("non_latin_script")
         all_urls = re.findall(r'https?://[^\s<>"\']{5,}', content)
         if len(all_urls) >= 2:
-            score += 25
+            score += 30
             reasons.append(f"links_{len(all_urls)}")
+        elif len(all_urls) == 1:
+            score += 18
+            reasons.append("link_1")
+        # v3.2: author_url externo es el vector típico del spam de comentarios
         if author_url and len(author_url) > 5:
-            score += 10
+            score += 18
             reasons.append("author_url")
         if self._PHISHING_HINTS.search(content):
             score += 40
@@ -207,40 +220,62 @@ class SpamPostCleaner:
         score = 0
         reasons = []
 
-        # +35: Script no-latin (>30% chars en bloques no-latinos)
+        # +40: Script no-latin (>30% chars en bloques no-latinos)
         if self._detect_non_latin_script(text):
-            score += 35
+            score += 40
             reasons.append("non_latin_script")
 
-        # Keywords por categoria (tomar max de cada categoria, acumulable entre categorias)
+        # v3.2: categorías de alto riesgo — una sola keyword inequívoca
+        # (viagra, casino, porn, nulled...) ya es señal fuerte de spam.
+        _HIGH_RISK = {"gambling", "adult", "pharma"}
+        _SCAM = {"investment_scam", "tech_support_scam", "phishing"}
+
+        # Keywords por categoria. v3.2: el puntaje ESCALA con la cantidad de hits
+        # (un post repleto de "casino/poker/slot/bet" es spam inequívoco), en vez
+        # del tope fijo anterior que dejaba pasar spam evidente.
         for cat_name, keywords in SPAM_KEYWORDS.items():
             hits = sum(1 for kw in keywords if kw.lower() in text_lower)
-            if hits >= 2:
-                points = {
-                    "gambling": 20,
-                    "adult": 20,
-                    "pharma": 20,
-                    "crypto_spam": 15,
-                    "piracy": 15,
-                }.get(cat_name, 10)
-                score += points
-                reasons.append(f"{cat_name}_{hits}hits")
+            if hits == 0:
+                continue
+            if cat_name in _HIGH_RISK:
+                points = 24 + min(hits, 5) * 4          # 1hit=28 ... 5+hits=44
+            elif cat_name in _SCAM:
+                points = 12 + min(hits, 4) * 4          # 1hit=16 ... 4+hits=28
+            elif hits >= 2:
+                points = 10 + min(hits, 4) * 3          # crypto_spam/piracy/genérico
+            else:
+                continue                                # 1 hit en categoría débil: ignorar
+            score += points
+            reasons.append(f"{cat_name}_{hits}hits")
 
-        # +10: Titulo contiene keywords de gambling/pharma/adult
+        # +12: Titulo contiene keywords de gambling/pharma/adult
         title_lower = title.lower()
         title_cats = ("gambling", "pharma", "adult")
         for cat in title_cats:
             kws = SPAM_KEYWORDS.get(cat, [])
             if any(kw.lower() in title_lower for kw in kws):
-                score += 10
+                score += 12
                 reasons.append(f"title_{cat}")
-                break  # Solo +10 una vez por titulo
+                break  # Solo una vez por titulo
 
-        # +10: Contenido con >4 URLs externas
+        # URLs externas — v3.2: escala con la cantidad
         urls = self._URL_RE.findall(content)
-        if len(urls) > 4:
-            score += 10
+        if len(urls) > 8:
+            score += 25
             reasons.append(f"external_urls_{len(urls)}")
+        elif len(urls) > 4:
+            score += 15
+            reasons.append(f"external_urls_{len(urls)}")
+        elif len(urls) >= 2:
+            score += 8
+            reasons.append(f"external_urls_{len(urls)}")
+
+        # v3.2: +25 enlaces ocultos (SEO spam clásico: display:none / posición fuera
+        # de pantalla / anchors vacíos) — fuerte indicador de inyección; el contenido
+        # legítimo casi nunca oculta enlaces.
+        if self._HIDDEN_LINK_RE.search(content):
+            score += 25
+            reasons.append("hidden_links")
 
         return min(score, 100), reasons
 

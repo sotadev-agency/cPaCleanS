@@ -25,6 +25,50 @@ _WP_ROOT_TXT = frozenset([
     "readme.txt", "license.txt", "readme.html",
 ])
 
+# ── v3.2: residuos que NO cumplen función vital (cuarentena en cualquier webroot) ──
+
+# Copias de seguridad / temporales de editores dejadas en el servidor
+_BACKUP_EXTS = frozenset([
+    ".bak", ".old", ".orig", ".save", ".saved", ".swp", ".swo",
+    ".tmp", ".temp", ".copy", ".backup", ".bk", ".previous", ".prev", ".~",
+])
+# Sufijos al final del nombre (antes de la ext real): index.php.bak, wp-config.php~
+_BACKUP_NAME_RE = re.compile(
+    r"(~$|\.(bak|old|orig|save|saved|copy|backup|bk|previous|prev)$|"
+    r"\.(php|js|css|html?|inc|sql|conf|ini|env)\.(bak|old|orig|save|copy|backup|txt|_?[0-9]+)$|"
+    r"[ _-]cop(?:y|ia)([ _-]?[0-9]+)?\.(php|js|css|html?|inc|sql|conf|ini|env|zip|tar|gz)$|"
+    r"\.(php|js|html?)\.(suspected|disabled|infected|quarantine))",
+    re.IGNORECASE)
+
+# Archivos comprimidos y volcados de BD olvidados en el webroot (riesgo de fuga)
+_ARCHIVE_EXTS = frozenset([
+    ".zip", ".tar", ".tar.gz", ".tgz", ".rar", ".7z", ".gz", ".bz2",
+])
+_DUMP_EXTS = frozenset([".sql", ".sql.gz", ".sql.zip", ".dump", ".mysql"])
+
+# Basura de sistema operativo / editores
+_OS_JUNK = frozenset([
+    ".ds_store", "thumbs.db", "desktop.ini", ".spotlight-v100",
+    ".trashes", "._.ds_store", ".fseventsd", "ehthumbs.db",
+])
+
+# Archivos PHP de diagnóstico / instaladores residuales (no vitales, riesgo expuesto)
+_DIAGNOSTIC_PHP = frozenset([
+    "phpinfo.php", "info.php", "i.php", "test.php", "tests.php",
+    "phptest.php", "php.php", "1.php", "2.php", "3.php", "temp.php",
+    "adminer.php", "adminer.php.txt", "pma.php", "dbtest.php",
+    "install.php.bak", "setup.php.bak", "wp-config.php.bak",
+    "wp-config.bak", "wp-config.old", "wp-config.txt", "wp-config.save",
+    "phpmyadmin.php", "sql.php", "mysql.php", "db.php.bak",
+])
+
+# Directorios que NO se exploran para residuos (dependencias/core legítimos)
+_SKIP_DIRS = frozenset([
+    "node_modules", "vendor", "wp-admin", "wp-includes",
+    ".git", ".svn", ".hg", "__pycache__", ".quarantine",
+    "cuarentena", "cache", "upgrade",
+])
+
 # Intentar importar magic para MIME detection
 try:
     import magic
@@ -47,6 +91,7 @@ class JunkCleaner:
     def process(self, cms_detected: list) -> list:
         """Escanea y limpia residuos. Retorna lista de dicts con resultados."""
         results = []
+        self._handled = set()  # rutas ya procesadas (evita duplicados entre barridos)
 
         for cms in cms_detected:
             roots = self._find_cms_roots(cms)
@@ -57,6 +102,11 @@ class JunkCleaner:
                     results.extend(self._scan_joomla_junk(root, cms))
                 # Moodle/OJS: sus uploads estan fuera del tree (moodledata), menos junk
 
+        # v3.2: barrido global de residuos no vitales en todos los webroots
+        # (backups, dumps, archivos de diagnóstico, basura de OS, carpetas vacías).
+        # Funciona también para proyectos de código propio sin CMS detectado.
+        results.extend(self._scan_residuals_global(cms_detected))
+
         if results:
             total = len(results)
             acted = sum(1 for r in results if r["action"] != "logged_only")
@@ -64,6 +114,152 @@ class JunkCleaner:
                 f"[JUNK] {total} residuos encontrados, {acted} procesados")
 
         return results
+
+    # ─────────────────────── v3.2: residuos globales ───────────────────────
+
+    def _find_webroots(self, cms_detected: list) -> list:
+        """Localiza las raíces web a barrer: todos los public_html + raíces CMS.
+        Si no hay ninguno, cae al propio extract_dir (proyecto suelto)."""
+        roots = []
+        seen = set()
+
+        def _add(p: Path):
+            try:
+                rp = p.resolve()
+            except OSError:
+                rp = p
+            key = str(rp).lower()
+            if key not in seen and p.exists() and p.is_dir():
+                seen.add(key)
+                roots.append(p)
+
+        for r, dirs, _files in os.walk(self.extract_dir):
+            for d in list(dirs):
+                if d.lower() == "public_html":
+                    _add(Path(r) / d)
+        for cms in cms_detected:
+            for cr in self._find_cms_roots(cms):
+                _add(cr)
+        if not roots:
+            _add(self.extract_dir)
+        return roots
+
+    def _scan_residuals_global(self, cms_detected: list) -> list:
+        """Barre los webroots buscando archivos y carpetas residuales no vitales."""
+        results = []
+        webroots = self._find_webroots(cms_detected)
+        for webroot in webroots:
+            for root, dirs, files in os.walk(webroot, topdown=True):
+                # podar directorios que no se exploran (dependencias/core/cuarentena)
+                dirs[:] = [d for d in dirs if d.lower() not in _SKIP_DIRS]
+                root_path = Path(root)
+                for fname in files:
+                    fpath = root_path / fname
+                    spath = str(fpath)
+                    if spath in self._handled or not fpath.exists():
+                        continue
+                    category = self._classify_residual(fpath, webroot)
+                    if category:
+                        self._handled.add(spath)
+                        results.append(self._handle_residual(fpath, category))
+            # carpetas vacías (tras mover archivos)
+            results.extend(self._quarantine_empty_dirs(webroot))
+        return results
+
+    def _classify_residual(self, fpath: Path, webroot: Path) -> str:
+        """Clasifica un archivo como residuo no vital, o '' si es legítimo."""
+        name = fpath.name
+        name_lower = name.lower()
+        suffix = fpath.suffix.lower()
+        # nombre compuesto para extensiones dobles (.tar.gz, .sql.gz)
+        lower_full = name_lower
+
+        # 1. Basura de sistema operativo / editores
+        if name_lower in _OS_JUNK:
+            return "os_junk"
+
+        # 2. PHP de diagnóstico / instaladores residuales
+        if name_lower in _DIAGNOSTIC_PHP:
+            return "diagnostic_php"
+
+        # 3. Volcados de BD expuestos en el webroot
+        if any(lower_full.endswith(e) for e in _DUMP_EXTS):
+            return "db_dump_exposed"
+
+        # 4. Archivos comprimidos olvidados en el webroot
+        if any(lower_full.endswith(e) for e in _ARCHIVE_EXTS):
+            return "archive_exposed"
+
+        # 5. Copias de seguridad / temporales de editores
+        if suffix in _BACKUP_EXTS or _BACKUP_NAME_RE.search(name):
+            return "backup_leftover"
+
+        return ""
+
+    def _quarantine_empty_dirs(self, webroot: Path) -> list:
+        """Elimina/cuarentena directorios vacíos residuales (de abajo hacia arriba)."""
+        results = []
+        if self.clean_mode == SCAN_MODE_ONLY:
+            return results
+        try:
+            all_dirs = [Path(r) / d for r, ds, _ in os.walk(webroot)
+                        for d in ds if d.lower() not in _SKIP_DIRS]
+        except (OSError, PermissionError):
+            return results
+        # procesar primero los más profundos
+        for d in sorted(all_dirs, key=lambda p: len(p.parts), reverse=True):
+            try:
+                if d.exists() and d.is_dir() and not any(d.iterdir()):
+                    try:
+                        rel = str(d.relative_to(self.extract_dir))
+                    except ValueError:
+                        rel = str(d)
+                    d.rmdir()
+                    results.append({
+                        "path": rel, "cms": "-", "category": "empty_dir",
+                        "action": "deleted",
+                    })
+            except (OSError, PermissionError):
+                pass
+        return results
+
+    def _handle_residual(self, fpath: Path, category: str) -> dict:
+        """Cuarentena (o elimina en strict) un residuo preservando su ruta relativa
+        para evitar colisiones de nombres."""
+        try:
+            rel_path = str(fpath.relative_to(self.extract_dir))
+        except ValueError:
+            rel_path = str(fpath)
+
+        entry = {"path": rel_path, "cms": "-", "category": category,
+                 "action": "logged_only"}
+
+        if self.clean_mode == SCAN_MODE_ONLY:
+            return entry
+
+        if self.clean_mode == CLEAN_MODE_STRICT:
+            try:
+                os.remove(str(fpath))
+                entry["action"] = "deleted"
+            except (OSError, PermissionError):
+                pass
+            return entry
+
+        # normal / intermediate: mover a cuarentena preservando estructura
+        try:
+            dest = self._junk_dir / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                stem, suf = dest.stem, dest.suffix
+                counter = 1
+                while dest.exists():
+                    dest = dest.parent / f"{stem}_{counter}{suf}"
+                    counter += 1
+            shutil.move(str(fpath), str(dest))
+            entry["action"] = "quarantined"
+        except (OSError, PermissionError, shutil.Error):
+            pass
+        return entry
 
     def _find_cms_roots(self, cms: str) -> list:
         markers = CMS_DETECTION_MARKERS.get(cms)

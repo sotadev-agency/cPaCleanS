@@ -114,6 +114,12 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
         {% if result.clean_mode_used %} &bull; Modo: <strong>{{ result.clean_mode_used|upper }}</strong>{% endif %}
         {% if result.critical_only_mode %} &bull; <span style="color:#33b5e5;">Solo contenido critico</span>{% endif %}</p>
         <p style="margin-top:4px;">Backup: {{ backup_path|short_name }}</p>
+        {% if result.main_domain %}
+        <p style="margin-top:4px;">Dominio principal: <strong style="color:#00d4ff;">{{ result.main_domain }}</strong>
+        {% if result.all_domains and result.all_domains|length > 1 %}
+            <span style="color:#8892b0; font-size:11px;">(+{{ result.all_domains|length - 1 }} dominios adicionales)</span>
+        {% endif %}</p>
+        {% endif %}
     </div>
 
     {% if result.critical_only_mode %}
@@ -544,6 +550,12 @@ class ReportGenerator:
                 seen.add(d)
                 domains.append(d)
 
+        # v3.2: el dominio principal del hosting (de userdata/main) es la fuente
+        # autoritativa — va primero para que aparezca como dominio en los reportes.
+        _add(getattr(result, "main_domain", "") or "")
+        for d in getattr(result, "all_domains", None) or []:
+            _add(d)
+
         gp = getattr(result, "generated_passwords", None) or {}
         for it in gp.get("wordpress", []) or []:
             _add(it.get("domain"))
@@ -911,6 +923,8 @@ class ReportGenerator:
                 "scan_date": datetime.now().isoformat(),
                 "backup_file": Path(backup_path).name if backup_path else "",
                 "clean_mode": result.clean_mode_used or "scan_only",
+                "main_domain": getattr(result, "main_domain", ""),
+                "domains": getattr(result, "all_domains", []),
             },
             "cms": {
                 "detected": result.cms_detected,

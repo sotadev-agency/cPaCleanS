@@ -47,6 +47,7 @@ WP_CORE_ROOT_FILES = [
     "wp-comments-post.php", "wp-cron.php", "wp-links-opml.php",
     "wp-load.php", "wp-login.php", "wp-mail.php", "wp-settings.php",
     "wp-signup.php", "wp-trackback.php", "xmlrpc.php",
+    "wp-config-sample.php",
 ]
 
 # ── Joomla ──
@@ -167,9 +168,14 @@ class CMSRestorer:
             # ── Rebuild de archivos PHP raiz (index.php, wp-login.php, etc.) ──
             rebuilt_root = self._rebuild_root_php_files(wp_root, clean_dir, WP_CORE_ROOT_FILES)
 
-            total = rebuilt_files + rebuilt_root
+            # ── v3.2 Bug #3: restaurar scaffold de wp-content (el wipe borra
+            #    wp-content/index.php y los index.php de plugins/themes, que el
+            #    rebuild de wp-admin/wp-includes no repone -> "faltan archivos") ──
+            scaffold = self._restore_wpcontent_scaffold(wp_root, clean_dir)
+
+            total = rebuilt_files + rebuilt_root + scaffold
             self.log.append({"type": "success", "cms": "wordpress",
-                           "message": f"Core rebuildeado: {total} archivos ({len(WP_CORE_DIRS)} dirs + {rebuilt_root} archivos raiz)"})
+                           "message": f"Core rebuildeado: {total} archivos ({len(WP_CORE_DIRS)} dirs + {rebuilt_root} archivos raiz + {scaffold} scaffold)"})
 
             # ── Reinstalar TODOS los plugins y el/los tema(s) desde WordPress.org ──
             self._restore_wp_plugins(wp_root, all_plugins)
@@ -177,6 +183,11 @@ class CMSRestorer:
             if active_theme:
                 theme_set.add(active_theme)
             self._restore_wp_themes(wp_root, theme_set, active_theme)
+
+            # ── v3.2 Bug #3: garantizar que el sitio nunca quede sin tema.
+            #    Si el tema activo era premium/no estaba en WP.org y no se pudo
+            #    reinstalar, se copia el tema por defecto incluido en el core limpio. ──
+            self._ensure_default_theme(wp_root, clean_dir, active_theme)
 
     def _gather_quarantined_slugs(self, base: str) -> set:
         """v2.6.6: Lee los slugs de las carpetas separadas pre-wipe en cuarentena.
@@ -233,6 +244,75 @@ class CMSRestorer:
             except (OSError, PermissionError):
                 pass
         return count
+
+    def _restore_wpcontent_scaffold(self, wp_root: Path, clean_root: Path) -> int:
+        """v3.2: repone los archivos de protección de wp-content que el wipe borra
+        y el rebuild de core no repone: wp-content/index.php y los index.php
+        ('silence is golden') de wp-content/plugins/ y wp-content/themes/."""
+        count = 0
+        wp_content = wp_root / "wp-content"
+        clean_wpc = clean_root / "wp-content"
+        if not clean_wpc.exists():
+            return 0
+        targets = [
+            (clean_wpc / "index.php", wp_content / "index.php"),
+            (clean_wpc / "plugins" / "index.php", wp_content / "plugins" / "index.php"),
+            (clean_wpc / "themes" / "index.php", wp_content / "themes" / "index.php"),
+        ]
+        for src, dst in targets:
+            if not src.exists():
+                continue
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if not dst.exists():
+                    shutil.copy2(str(src), str(dst))
+                    count += 1
+            except (OSError, PermissionError):
+                pass
+        return count
+
+    def _ensure_default_theme(self, wp_root: Path, clean_root: Path, active_theme: str = ""):
+        """v3.2: garantiza que exista al menos un tema instalado. Si el tema activo
+        no quedó instalado (premium/no en WP.org) y no hay ningún otro tema, copia
+        el tema por defecto incluido en el core limpio (twentytwenty*)."""
+        themes_dir = wp_root / "wp-content" / "themes"
+        clean_themes = clean_root / "wp-content" / "themes"
+
+        # ¿El tema activo ya está instalado con contenido real?
+        if active_theme:
+            at = themes_dir / active_theme
+            if at.is_dir() and at.exists() and any(at.rglob("*.php")):
+                return
+
+        # ¿Existe ya algún tema válido (con style.css)?
+        if themes_dir.exists():
+            for d in themes_dir.iterdir():
+                if d.is_dir() and (d / "style.css").exists():
+                    return
+
+        if not clean_themes.exists():
+            return
+        # Copiar el tema por defecto del core (el más reciente twentytwenty*)
+        defaults = sorted(
+            [d for d in clean_themes.iterdir()
+             if d.is_dir() and d.name.startswith("twenty")],
+            reverse=True)
+        if not defaults:
+            defaults = [d for d in clean_themes.iterdir() if d.is_dir()]
+        if not defaults:
+            return
+        src_theme = defaults[0]
+        dst_theme = themes_dir / src_theme.name
+        try:
+            themes_dir.mkdir(parents=True, exist_ok=True)
+            if dst_theme.exists():
+                shutil.rmtree(str(dst_theme), ignore_errors=True)
+            shutil.copytree(str(src_theme), str(dst_theme))
+            self.log.append({"type": "warning", "cms": "wordpress",
+                "message": f"Tema activo '{active_theme or '?'}' no disponible en WP.org; "
+                           f"instalado tema por defecto '{src_theme.name}' para que el sitio cargue"})
+        except (OSError, PermissionError, shutil.Error):
+            pass
 
     def _read_wp_active_from_sql(self, sql_path: str) -> tuple:
         active_plugins = set()
