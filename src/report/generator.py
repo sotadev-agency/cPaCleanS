@@ -889,3 +889,90 @@ class ReportGenerator:
             if uni in text:
                 text = text.replace(uni, repl)
         return text.encode("latin-1", errors="replace").decode("latin-1")
+
+    def generate_json(self, result: ScanResult, backup_path: str = "") -> str:
+        """v3.1: Exporta resultados del escaneo a JSON estructurado.
+
+        Útil para integraciones con sistemas de tickets (WHMCS, Jira, Slack),
+        webhooks post-limpieza, o archivo de auditoría.
+        """
+        import json
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        json_path = self.output_dir / f"cpacleans_{timestamp}.json"
+
+        confirmed_count = sum(1 for f in result.findings if f.confirmed_malware)
+
+        data = {
+            "meta": {
+                "tool": "cPaCleanS",
+                "version": APP_VERSION,
+                "scan_date": datetime.now().isoformat(),
+                "backup_file": Path(backup_path).name if backup_path else "",
+                "clean_mode": result.clean_mode_used or "scan_only",
+            },
+            "cms": {
+                "detected": result.cms_detected,
+                "prefixes": getattr(result, "db_prefixes", {}),
+            },
+            "summary": {
+                "total_files_scanned": result.total_files_scanned,
+                "total_threats": result.total_threats_found,
+                "confirmed_malware": confirmed_count,
+                "quarantined": result.total_cleaned,
+                "scan_duration_seconds": result.scan_duration_seconds,
+                "workers": result.workers_used,
+                "by_severity": result.summary_by_severity,
+                "by_category": result.summary_by_category,
+            },
+            "iocs": getattr(result, "iocs", {}),
+            "findings": [
+                {
+                    "file": f.file_path,
+                    "line": f.line_number,
+                    "severity": f.severity,
+                    "category": f.category,
+                    "description": f.description,
+                    "confidence": f.confidence_score,
+                    "confirmed": f.confirmed_malware,
+                    "cleaned": f.cleaned,
+                    "sha256": f.sha256,
+                    "context": f.context[:200] if f.context else "",
+                }
+                for f in result.findings
+                if f.severity in ("critical", "high") or f.confirmed_malware
+            ][:500],
+            "database": {
+                "interventions": len(getattr(result, "db_interventions_log", []) or []),
+                "cron_neutralized": len(getattr(result, "db_cron_log", []) or []),
+                "users_cleaned": len(getattr(result, "db_users_log", []) or []),
+                "spam_posts": len(getattr(result, "spam_posts_log", []) or []),
+                "very_infected": getattr(result, "db_very_infected", False),
+            },
+            "cms_restore": {
+                "plugins_processed": len(getattr(result, "plugins_temas_log", []) or []),
+                "log": [
+                    {
+                        "type": e.get("type"),
+                        "message": e.get("message", "")[:120],
+                    }
+                    for e in (getattr(result, "cms_restore_log", []) or [])[:100]
+                ],
+            },
+            "virustotal": [
+                {
+                    "file": Path(r.file_path).name,
+                    "sha256": r.sha256,
+                    "detections": r.detection_count,
+                    "total_engines": r.total_engines,
+                    "permalink": r.permalink,
+                }
+                for r in (getattr(result, "virustotal_hits", []) or [])
+            ],
+        }
+
+        with open(str(json_path), "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+
+        return str(json_path)

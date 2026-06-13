@@ -84,6 +84,22 @@ HTACCESS_PATTERNS = [
     ("medium", "htaccess_suspicious", r'SetHandler\s+application/x-httpd-php', "SetHandler forzando PHP en directorio"),
 ]
 
+# v3.1: Archivos PHP codificados comercialmente — pueden ocultar malware
+ENCODED_PHP_PATTERNS = [
+    ("high", "encoded_php", r'ionCube|IonCube\s+PHP\s+Encoder|ioncube_read_file|the\s+ionCube\s+PHP\s+Loader', "Archivo PHP codificado con IonCube (revisar)"),
+    ("high", "encoded_php", r'@Zend;|Zend\s+Guard|Zend\s+Optimizer|zend_loader', "Archivo PHP codificado con Zend Guard (revisar)"),
+    ("high", "encoded_php", r'SourceGuardian|sg_load\s*\(|sg_validate', "Archivo PHP codificado con SourceGuardian (revisar)"),
+    ("high", "encoded_php", r'Obfuscated\s+by\s+Obfuscator\.io|eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k', "PHP ofuscado con Obfuscator.io"),
+]
+
+# v3.1: .user.ini y php.ini — auto_prepend/append son inyección garantizada
+USERINI_PATTERNS = [
+    ("critical", "userini_php", r'auto_prepend_file\s*=\s*\S', "auto_prepend_file en archivo INI (ejecución automática)"),
+    ("critical", "userini_php", r'auto_append_file\s*=\s*\S', "auto_append_file en archivo INI (ejecución automática)"),
+    ("high", "userini_php", r'disable_functions\s*=\s*[\r\n]', "disable_functions vaciado en INI (habilita funciones peligrosas)"),
+    ("high", "userini_php", r'open_basedir\s*=\s*[\r\n]', "open_basedir vaciado en INI (acceso irrestricto a filesystem)"),
+    ("high", "userini_php", r'suhosin\.executor\.eval\.blacklist\s*=\s*[\r\n]', "Blacklist de suhosin vaciada en INI"),
+]
 
 FAST_KEYWORDS_PHP = {
     "eval", "assert", "preg_replace", "system", "exec", "passthru",
@@ -102,6 +118,8 @@ FAST_KEYWORDS_PHP = {
     "fsockopen", "pcntl_exec", "array_map", "usort", "unserialize",
     "str_split", "ob_start", "register_shutdown_function",
     "ReflectionFunction", "set_error_handler",
+    # v3.1: codificadores comerciales
+    "ionCube", "IonCube", "@Zend;", "SourceGuardian", "sg_load", "zend_loader",
 }
 
 FAST_KEYWORDS_JS = {
@@ -113,6 +131,11 @@ FAST_KEYWORDS_JS = {
 FAST_KEYWORDS_HTACCESS = {
     "RewriteRule", "AddHandler", "php_value", "SetHandler",
     "auto_prepend", "auto_append",
+}
+
+FAST_KEYWORDS_USERINI = {
+    "auto_prepend_file", "auto_append_file", "disable_functions",
+    "open_basedir", "suhosin",
 }
 
 # ── v2.6.2: Detector de archivos PHP sin codigo ejecutable (Mejora #1) ──
@@ -176,14 +199,16 @@ class PHPScanner:
 
     def __init__(self):
         self._compiled = {}
-        for sev, cat, pattern, desc in PHP_PATTERNS + JS_PATTERNS + HTACCESS_PATTERNS:
+        all_pats = PHP_PATTERNS + JS_PATTERNS + HTACCESS_PATTERNS + ENCODED_PHP_PATTERNS + USERINI_PATTERNS
+        for sev, cat, pattern, desc in all_pats:
             self._compiled[pattern] = (re.compile(pattern, re.IGNORECASE), sev, cat, desc)
 
-        self._batch_php = self._build_batch(PHP_PATTERNS)
+        self._batch_php = self._build_batch(PHP_PATTERNS + ENCODED_PHP_PATTERNS)
         self._batch_js = self._build_batch(JS_PATTERNS)
         self._batch_htaccess = self._build_batch(HTACCESS_PATTERNS)
-        self._batch_html = self._build_batch(PHP_PATTERNS + JS_PATTERNS)
+        self._batch_html = self._build_batch(PHP_PATTERNS + JS_PATTERNS + ENCODED_PHP_PATTERNS)
         self._batch_css = self._batch_js
+        self._batch_userini = self._build_batch(USERINI_PATTERNS)
 
     def scan(self, file_path: str) -> list:
         fp = Path(file_path)
@@ -202,6 +227,9 @@ class PHPScanner:
         elif name == ".htaccess":
             batch = self._batch_htaccess
             fast_kw = FAST_KEYWORDS_HTACCESS
+        elif name in (".user.ini", "php.ini") or ext in (".ini",):
+            batch = self._batch_userini
+            fast_kw = FAST_KEYWORDS_USERINI
         elif ext in (".css", ".svg"):
             batch = self._batch_css
             fast_kw = FAST_KEYWORDS_JS

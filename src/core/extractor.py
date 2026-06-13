@@ -40,11 +40,77 @@ class BackupExtractor:
         "homedir": ["homedir", "public_html"],
     }
 
+    # Rutas que indican backup cPanel válido
+    _VALID_CPANEL_PATHS = frozenset({
+        "homedir", "public_html", "mysql", "mail", "etc",
+        "userdata", "ssl", "bandwidth", "logs",
+    })
+
     def __init__(self, backup_path: str, progress_callback=None):
         self.backup_path = Path(backup_path)
         self.progress_callback = progress_callback or (lambda *a: None)
         self.extract_dir = None
         self._errors = []
+
+    @classmethod
+    def validate(cls, backup_path: str) -> dict:
+        """v3.1: Valida que el archivo es un backup cPanel reconocible antes de extraer.
+
+        Retorna {"valid": True/False, "reason": "...", "file_count": N, "has_homedir": bool}
+        Lanza ValueError si el archivo no existe o el formato no es soportado.
+        """
+        bp = Path(backup_path)
+        if not bp.exists():
+            raise ValueError(f"Archivo no encontrado: {backup_path}")
+
+        name = bp.name.lower()
+        result = {"valid": False, "reason": "", "file_count": 0, "has_homedir": False}
+
+        try:
+            if name.endswith((".tar.gz", ".tgz")):
+                with tarfile.open(str(bp), "r:gz") as tar:
+                    members = tar.getnames()
+                    result["file_count"] = len(members)
+                    # Revisar hasta 500 entradas para detectar estructura cPanel
+                    sample = members[:500]
+                    top_dirs = set()
+                    for m in sample:
+                        parts = m.replace("\\", "/").lstrip("/").split("/")
+                        if len(parts) >= 2:
+                            top_dirs.add(parts[0].lower())
+                        elif len(parts) == 1 and parts[0]:
+                            top_dirs.add(parts[0].lower())
+                    matches = top_dirs & cls._VALID_CPANEL_PATHS
+                    result["has_homedir"] = bool({"homedir", "public_html"} & top_dirs)
+                    if matches:
+                        result["valid"] = True
+                        result["reason"] = f"Estructura cPanel detectada: {', '.join(sorted(matches))}"
+                    else:
+                        result["reason"] = (
+                            "No se detectó estructura cPanel (homedir, public_html, mysql, etc.). "
+                            "Puede ser un backup de otro sistema o estar vacío."
+                        )
+            elif name.endswith(".zip"):
+                with zipfile.ZipFile(str(bp), "r") as zf:
+                    members = zf.namelist()
+                    result["file_count"] = len(members)
+                    top_dirs = {m.replace("\\", "/").split("/")[0].lower() for m in members[:500]}
+                    matches = top_dirs & cls._VALID_CPANEL_PATHS
+                    result["has_homedir"] = bool({"homedir", "public_html"} & top_dirs)
+                    result["valid"] = bool(matches)
+                    result["reason"] = (
+                        f"Estructura ZIP cPanel: {', '.join(sorted(matches))}" if matches
+                        else "No se detectó estructura cPanel en el ZIP."
+                    )
+            elif name.endswith(".gz"):
+                result["valid"] = True
+                result["reason"] = "Archivo .gz — sin validación de estructura interna"
+            else:
+                raise ValueError(f"Formato no soportado: {name}")
+        except (tarfile.TarError, zipfile.BadZipFile) as e:
+            raise ValueError(f"Archivo corrupto o no es un backup válido: {e}") from e
+
+        return result
 
     def extract(self, destination=None):
         if destination:

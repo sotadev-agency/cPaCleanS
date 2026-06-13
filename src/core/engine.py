@@ -23,6 +23,7 @@ CONFIRMED_MALWARE_CATEGORIES = {
     "malicious_attachment",
     "htaccess_redirect", "htaccess_handler", "htaccess_php",
     "mailer_backdoor",  # v2.6.5: cfg.php con SPAM relay / phishing
+    "userini_php",      # v3.1: auto_prepend/append en .user.ini
 }
 
 # v2.6.6: Drop-ins legitimos de WordPress que pueden vivir en wp-content/ (raiz).
@@ -100,6 +101,8 @@ class ScanResult:
     db_users_log: list = field(default_factory=list)       # usuarios limpiados
     generated_passwords: dict = field(default_factory=dict)  # contrasenas generadas
     db_very_infected: bool = False
+    # v3.1 — indicadores de compromiso extraídos de findings
+    iocs: dict = field(default_factory=dict)   # {"ips": [...], "urls": [...], "domains": [...]}
 
 
 # --- Multiprocessing worker con scanners persistentes por proceso ---
@@ -709,6 +712,43 @@ class ScanEngine:
                         except (OSError, PermissionError, shutil.Error):
                             pass
         return counts
+
+    def extract_iocs(self) -> dict:
+        """v3.1: Extrae indicadores de compromiso (IPs, URLs, dominios) de los findings confirmados."""
+        import re as _re
+        _ip = _re.compile(r'\b(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?:\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)){3}\b')
+        _url = _re.compile(r'https?://[^\s\'"<>{}\[\]]{10,120}', _re.IGNORECASE)
+        _dom = _re.compile(
+            r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)'
+            r'+(?:com|net|org|io|ru|cn|tk|xyz|top|info|biz|cc|pw|su|ws|me|co|online)\b',
+            _re.IGNORECASE,
+        )
+        _PRIVATE = ('127.', '10.', '192.168.', '172.16.', '172.17.',
+                    '172.18.', '172.19.', '172.20.', '0.0.0.0', '255.')
+        _SAFE_DOMS = frozenset({
+            'wordpress.org', 'wp.com', 'github.com', 'php.net', 'google.com',
+            'googleapis.com', 'jquery.com', 'jquery.org', 'bootstrapcdn.com',
+            'cloudflare.com', 'cloudfront.net', 'amazonaws.com', 'paypal.com',
+        })
+
+        ips, urls, domains = set(), set(), set()
+        for f in self.result.findings:
+            if not f.confirmed_malware:
+                continue
+            text = f"{f.context} {f.matched_pattern} {f.description}"
+            ips.update(_ip.findall(text))
+            urls.update(_url.findall(text))
+            domains.update(_dom.findall(text.lower()))
+
+        public_ips = sorted(ip for ip in ips if not any(ip.startswith(p) for p in _PRIVATE))
+        clean_urls = sorted(urls)[:50]
+        clean_doms = sorted(
+            d for d in domains
+            if d not in _SAFE_DOMS and not any(s in d for s in _SAFE_DOMS)
+        )[:30]
+
+        self.result.iocs = {"ips": public_ips, "urls": clean_urls, "domains": clean_doms}
+        return self.result.iocs
 
     def _build_summaries(self):
         by_sev = {}
