@@ -5,3 +5,6 @@ build_temp/
 __pycache__/
 *.pyc
 .env
+
+# Artefactos de build, dependencias npm, scripts y docs internas reorganizados
+recursos-generados/
