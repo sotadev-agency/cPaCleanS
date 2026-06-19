@@ -1,7 +1,5 @@
 """Escáner especializado para CMS — WordPress, Joomla, Moodle, Laravel, Softaculous."""
 import re
-import os
-import hashlib
 from pathlib import Path
 from ..core.engine import Finding
 from ..config.settings import CACHE_HTACCESS_SIGNATURES

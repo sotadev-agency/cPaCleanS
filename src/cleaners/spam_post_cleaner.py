@@ -4,7 +4,6 @@ Scoring por multiples indicadores: idioma no-latin, keywords de spam,
 URLs externas masivas. Protege post_types seguros y posts con comentarios.
 """
 import re
-from typing import Optional
 
 from ..config.settings import (
     SCAN_MODE_ONLY, SPAM_SCORE_THRESHOLD, SPAM_KEYWORDS,
@@ -100,10 +99,12 @@ class SpamPostCleaner:
                 self.spam_log.append(entry)
                 continue
 
-            # Regla 3: Nunca eliminar posts con comentarios aprobados
+            # Regla 3: Proteger posts con comentarios SOLO si el score no es muy alto.
+            # Score >= 75 indica spam/phishing inequívoco — se elimina aunque tenga
+            # comentarios (que probablemente también sean spam inyectado).
             comment_count = int(row.get("comment_count", 0) or 0)
             comment_status = row.get("comment_status", "")
-            if comment_count > 0 and comment_status == "open":
+            if comment_count > 0 and comment_status == "open" and score < 75:
                 entry["action"] = "suspect_not_deleted"
                 entry["reason"] = "has_comments"
                 self.spam_log.append(entry)
@@ -170,22 +171,27 @@ class SpamPostCleaner:
             reasons.append("non_latin_script")
         all_urls = re.findall(r'https?://[^\s<>"\']{5,}', content)
         if len(all_urls) >= 2:
-            score += 30
+            score += 35
             reasons.append(f"links_{len(all_urls)}")
         elif len(all_urls) == 1:
-            score += 18
+            score += 22
             reasons.append("link_1")
-        # v3.2: author_url externo es el vector típico del spam de comentarios
+        # author_url externo: vector típico de spam de comentarios
         if author_url and len(author_url) > 5:
-            score += 18
+            score += 20
             reasons.append("author_url")
         if self._PHISHING_HINTS.search(content):
-            score += 40
+            score += 50
             reasons.append("phishing_keywords")
         text_lower = content.lower()
+        _HIGH_RISK_CATS = {"gambling", "adult", "pharma"}
         for cat_name, keywords in SPAM_KEYWORDS.items():
-            if sum(1 for kw in keywords if kw.lower() in text_lower) >= 2:
-                score += 15
+            hits = sum(1 for kw in keywords if kw.lower() in text_lower)
+            if cat_name in _HIGH_RISK_CATS and hits >= 1:
+                score += 40
+                reasons.append(f"{cat_name}")
+            elif hits >= 2:
+                score += 18
                 reasons.append(f"{cat_name}")
         return min(score, 100), reasons
 
@@ -225,24 +231,24 @@ class SpamPostCleaner:
             score += 40
             reasons.append("non_latin_script")
 
-        # v3.2: categorías de alto riesgo — una sola keyword inequívoca
-        # (viagra, casino, porn, nulled...) ya es señal fuerte de spam.
+        # v3.2+: categorías de alto riesgo.
+        # Una sola keyword inequívoca (viagra, casino, porn, nulled...) supera el umbral.
         _HIGH_RISK = {"gambling", "adult", "pharma"}
         _SCAM = {"investment_scam", "tech_support_scam", "phishing"}
+        _MAILER = {"mailer_spam", "bulk_mail", "phishing_mail"}  # categorías de mailing
 
-        # Keywords por categoria. v3.2: el puntaje ESCALA con la cantidad de hits
-        # (un post repleto de "casino/poker/slot/bet" es spam inequívoco), en vez
-        # del tope fijo anterior que dejaba pasar spam evidente.
+        # Keywords por categoria. El puntaje ESCALA con la cantidad de hits.
+        # HIGH_RISK: 1 hit ya supera el umbral por sí solo (spam inequívoco).
         for cat_name, keywords in SPAM_KEYWORDS.items():
             hits = sum(1 for kw in keywords if kw.lower() in text_lower)
             if hits == 0:
                 continue
             if cat_name in _HIGH_RISK:
-                points = 24 + min(hits, 5) * 4          # 1hit=28 ... 5+hits=44
-            elif cat_name in _SCAM:
-                points = 12 + min(hits, 4) * 4          # 1hit=16 ... 4+hits=28
+                points = 36 + min(hits, 5) * 4          # 1hit=40 ... 5+hits=56
+            elif cat_name in _SCAM or cat_name in _MAILER:
+                points = 20 + min(hits, 4) * 6          # 1hit=26 ... 4+hits=44
             elif hits >= 2:
-                points = 10 + min(hits, 4) * 3          # crypto_spam/piracy/genérico
+                points = 12 + min(hits, 4) * 4          # crypto_spam/piracy/genérico: 2hits=20
             else:
                 continue                                # 1 hit en categoría débil: ignorar
             score += points

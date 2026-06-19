@@ -160,34 +160,49 @@ class CMSRestorer:
             self.log.append({"type": "info", "cms": "wordpress", "message": f"WordPress {version} en {wp_root.name}"})
             clean_dir = self._download_wp_core(version)
             if not clean_dir:
-                continue
+                # Fallback: intentar con la última versión estable de WordPress.org
+                latest = self._get_latest_wp_version()
+                if latest and latest != version:
+                    self.log.append({"type": "warning", "cms": "wordpress",
+                        "message": f"No se pudo descargar WP {version}; usando última estable {latest}"})
+                    clean_dir = self._download_wp_core(latest)
+                if not clean_dir:
+                    self.log.append({"type": "error", "cms": "wordpress",
+                        "message": f"No se pudo descargar el core limpio de WordPress.org — "
+                                   f"core NO reemplazado en {wp_root.name}"})
+                    continue
 
-            # ── Rebuild completo de directorios core ──
-            rebuilt_files = self._full_rebuild_dirs(wp_root, clean_dir, WP_CORE_DIRS, cms_key="wordpress")
-
-            # ── Rebuild de archivos PHP raiz (index.php, wp-login.php, etc.) ──
-            rebuilt_root = self._rebuild_root_php_files(wp_root, clean_dir, WP_CORE_ROOT_FILES)
-
-            # ── v3.2 Bug #3: restaurar scaffold de wp-content (el wipe borra
-            #    wp-content/index.php y los index.php de plugins/themes, que el
-            #    rebuild de wp-admin/wp-includes no repone -> "faltan archivos") ──
-            scaffold = self._restore_wpcontent_scaffold(wp_root, clean_dir)
-
-            total = rebuilt_files + rebuilt_root + scaffold
+            # ── v3.0.3: REEMPLAZO TOTAL del core (no sobreescritura) ──
+            # Se elimina TODO el core de WordPress en la raíz (wp-admin, wp-includes,
+            # todos los .php raíz y cualquier archivo/carpeta que no sea contenido de
+            # usuario) y se instala íntegro el core limpio descargado de WordPress.org.
+            # Se conserva ÚNICAMENTE wp-content/, wp-config.php (+ .htaccess/.user.ini).
+            # I/O tolerante a rutas largas de Windows (prefijo \\?\) para que ningún
+            # archivo profundo (p.ej. wp-includes/php-ai-client/...) quede sin reponer.
+            removed, copied = self._replace_wp_core(wp_root, clean_dir)
             self.log.append({"type": "success", "cms": "wordpress",
-                           "message": f"Core rebuildeado: {total} archivos ({len(WP_CORE_DIRS)} dirs + {rebuilt_root} archivos raiz + {scaffold} scaffold)"})
+                "message": f"Core REEMPLAZADO por versión limpia de WordPress.org: "
+                           f"{removed} elementos antiguos eliminados, {copied} archivos limpios instalados"})
 
             # ── Reinstalar TODOS los plugins y el/los tema(s) desde WordPress.org ──
-            self._restore_wp_plugins(wp_root, all_plugins)
+            installed_plugins = self._restore_wp_plugins(wp_root, all_plugins) or set()
             theme_set = set(quarantined_themes)
             if active_theme:
                 theme_set.add(active_theme)
-            self._restore_wp_themes(wp_root, theme_set, active_theme)
+            installed_themes = self._restore_wp_themes(wp_root, theme_set, active_theme) or set()
 
             # ── v3.2 Bug #3: garantizar que el sitio nunca quede sin tema.
             #    Si el tema activo era premium/no estaba en WP.org y no se pudo
             #    reinstalar, se copia el tema por defecto incluido en el core limpio. ──
-            self._ensure_default_theme(wp_root, clean_dir, active_theme)
+            default_theme = self._ensure_default_theme(wp_root, clean_dir, active_theme)
+            if default_theme:
+                installed_themes.add(default_theme)
+
+            # ── v3.0.2 Issue #5: el resultado final SOLO debe contener addons
+            #    reinstalados desde el repositorio oficial. Cualquier carpeta antigua
+            #    de plugin/tema que haya sobrevivido al wipe (p.ej. por rutas largas
+            #    en Windows) se elimina para no dejar versiones posiblemente infectadas. ──
+            self._enforce_repo_addons(wp_root, installed_plugins, installed_themes)
 
     def _gather_quarantined_slugs(self, base: str) -> set:
         """v2.6.6: Lee los slugs de las carpetas separadas pre-wipe en cuarentena.
@@ -230,51 +245,239 @@ class CMSRestorer:
             pass
         return ""
 
-    def _rebuild_root_php_files(self, site_root: Path, clean_root: Path, file_list: list) -> int:
-        """Reemplaza archivos PHP raiz del core (no toca wp-config.php ni .htaccess)."""
-        count = 0
-        for fname in file_list:
-            clean_file = clean_root / fname
-            site_file = site_root / fname
-            if not clean_file.exists():
+    def _enforce_repo_addons(self, wp_root: Path, allowed_plugins: set, allowed_themes: set):
+        """v3.0.2 Issue #5: garantiza que wp-content/plugins y wp-content/themes
+        contengan ÚNICAMENTE los addons reinstalados desde el repositorio oficial.
+
+        Cualquier carpeta de plugin/tema que sobreviviera al wipe (p.ej. porque el
+        move/rmtree falló por rutas largas en Windows) y NO esté en el set reinstalado
+        se mueve a cuarentena (o se elimina) — evita dejar versiones antiguas que
+        pueden estar infectadas. Aplica en todos los modos salvo solo-escaneo (esta
+        función solo se invoca durante la restauración, que no corre en scan-only)."""
+        mapping = [("plugins", {s.lower() for s in (allowed_plugins or set())}),
+                   ("themes", {s.lower() for s in (allowed_themes or set())})]
+        for sub, allowed_lower in mapping:
+            d = wp_root / "wp-content" / sub
+            if not d.exists():
                 continue
             try:
-                shutil.copy2(str(clean_file), str(site_file))
-                count += 1
+                entries = [x for x in d.iterdir() if x.is_dir()]
+            except (OSError, PermissionError):
+                continue
+            for item in entries:
+                if item.name.lower() in allowed_lower:
+                    continue  # recién instalado desde repo → conservar
+                # superviviente antiguo no reinstalable → remover por seguridad
+                moved = self._quarantine_old_addon(item, sub)
+                self.log.append({
+                    "type": "warning", "cms": "wordpress",
+                    "message": (
+                        f"{'Plugin' if sub == 'plugins' else 'Tema'} '{item.name}' no se "
+                        f"reinstaló desde repositorio oficial; "
+                        f"{'movido a cuarentena' if moved else 'eliminado'} del resultado "
+                        f"(posible versión antigua/infectada — reinstalar manualmente)"),
+                })
+
+    def _quarantine_old_addon(self, addon_dir: Path, sub: str) -> bool:
+        """Mueve un addon antiguo a cuarentena (cms_components/wordpress/eliminados_no_repo/)
+        o lo elimina si no hay cuarentena. Robusto ante rutas largas en Windows.
+        Retorna True si se preservó en cuarentena, False si solo se eliminó/borró."""
+        if self.quarantine_dir:
+            dest_base = (self.quarantine_dir / "cms_components" / "wordpress"
+                         / "eliminados_no_repo" / sub)
+            try:
+                dest_base.mkdir(parents=True, exist_ok=True)
+                dest = dest_base / addon_dir.name
+                counter = 0
+                while dest.exists():
+                    counter += 1
+                    dest = dest_base / f"{addon_dir.name}_{counter}"
+                shutil.move(str(addon_dir), str(dest))
+                return True
+            except (OSError, PermissionError, shutil.Error):
+                # fallback: eliminar (robusto ante rutas largas en Windows)
+                pass
+        self._robust_rmtree(addon_dir)
+        return False
+
+    # ───────────────── I/O tolerante a rutas largas en Windows ─────────────────
+
+    @staticmethod
+    def _winlong(p) -> str:
+        """Devuelve la ruta absoluta con prefijo \\\\?\\ en Windows (elimina el
+        límite de 260 chars). En otros SO devuelve la ruta absoluta normal."""
+        ap = os.path.abspath(str(p))
+        if os.name == "nt" and not ap.startswith("\\\\?\\"):
+            if ap.startswith("\\\\"):           # ruta UNC
+                return "\\\\?\\UNC\\" + ap[2:]
+            return "\\\\?\\" + ap
+        return ap
+
+    @classmethod
+    def _robust_rmtree(cls, path):
+        """rmtree tolerante a rutas largas (prefijo \\\\?\\). Reintenta sin prefijo."""
+        shutil.rmtree(cls._winlong(path), ignore_errors=True)
+        if Path(path).exists():
+            shutil.rmtree(str(path), ignore_errors=True)
+
+    @classmethod
+    def _robust_unlink(cls, path):
+        """Elimina un archivo tolerando rutas largas."""
+        for target in (cls._winlong(path), str(path)):
+            try:
+                os.remove(target)
+                return
+            except FileNotFoundError:
+                return
+            except (OSError, PermissionError):
+                continue
+
+    @classmethod
+    def _robust_copytree(cls, src, dst) -> int:
+        """Copia recursiva tolerante a rutas largas (recorre y escribe con prefijo
+        \\\\?\\ para alcanzar archivos profundos). Retorna nº de archivos copiados."""
+        count = 0
+        src_long = cls._winlong(src)
+        for root, _dirs, files in os.walk(src_long):
+            rel = os.path.relpath(root, src_long)
+            target_dir = Path(dst) if rel == "." else Path(dst) / rel
+            try:
+                os.makedirs(cls._winlong(target_dir), exist_ok=True)
             except (OSError, PermissionError):
                 pass
+            for f in files:
+                s = os.path.join(root, f)
+                d = cls._winlong(Path(target_dir) / f)
+                try:
+                    shutil.copy2(s, d)
+                    count += 1
+                except (OSError, PermissionError, shutil.Error):
+                    pass
         return count
 
+    @classmethod
+    def _robust_copy(cls, src, dst) -> bool:
+        """Copia un archivo tolerando rutas largas, creando el directorio padre."""
+        try:
+            os.makedirs(cls._winlong(Path(dst).parent), exist_ok=True)
+            shutil.copy2(cls._winlong(src), cls._winlong(dst))
+            return True
+        except (OSError, PermissionError, shutil.Error):
+            return False
+
+    @staticmethod
+    def _safe_iter(path: Path):
+        try:
+            yield from path.iterdir()
+        except (OSError, PermissionError):
+            return
+
+    # Contenido de usuario / config que se PRESERVA al reemplazar el core.
+    # El zip oficial de WordPress no incluye estos, así que nunca se pisan;
+    # se listan para no eliminarlos al limpiar la raíz.
+    _CORE_PRESERVE = frozenset({"wp-content", "wp-config.php", ".htaccess", ".user.ini"})
+
+    def _replace_wp_core(self, wp_root: Path, clean_dir: Path) -> tuple:
+        """v3.0.3: Reemplaza por completo el core de WordPress.
+
+        1) Elimina TODO en la raíz salvo wp-content/, wp-config.php, .htaccess y
+           .user.ini (el core NO se sobreescribe archivo a archivo: se borra entero).
+        2) Copia el core limpio descargado de WordPress.org (wp-admin, wp-includes,
+           todos los .php raíz). El wp-content del zip NO se copia para no pisar el
+           contenido del usuario; solo se repone su scaffold (index.php + languages/).
+
+        Retorna (elementos_eliminados, archivos_copiados).
+        """
+        removed = 0
+        # 1) Limpiar la raíz (todo lo que no sea contenido de usuario)
+        for item in self._safe_iter(wp_root):
+            if item.name.lower() in self._CORE_PRESERVE:
+                continue
+            try:
+                if item.is_dir() and not item.is_symlink():
+                    self._robust_rmtree(item)
+                else:
+                    self._robust_unlink(item)
+                removed += 1
+            except (OSError, PermissionError):
+                pass
+
+        # 2) Instalar el core limpio íntegro (salvo wp-content del zip)
+        copied = 0
+        for item in self._safe_iter(clean_dir):
+            if item.name.lower() == "wp-content":
+                continue  # no pisar contenido de usuario
+            dst = wp_root / item.name
+            if item.is_dir():
+                copied += self._robust_copytree(item, dst)
+            else:
+                if self._robust_copy(item, dst):
+                    copied += 1
+
+        # 3) Reponer scaffold de wp-content (index.php de protección + languages/)
+        copied += self._restore_wpcontent_scaffold(wp_root, clean_dir)
+        return removed, copied
+
     def _restore_wpcontent_scaffold(self, wp_root: Path, clean_root: Path) -> int:
-        """v3.2: repone los archivos de protección de wp-content que el wipe borra
-        y el rebuild de core no repone: wp-content/index.php y los index.php
-        ('silence is golden') de wp-content/plugins/ y wp-content/themes/."""
+        """v3.2+: repone archivos y directorios core de wp-content que el wipe elimina
+        y el rebuild de wp-admin/wp-includes no repone.
+        Incluye: index.php de protección, directorio languages/ del core."""
         count = 0
         wp_content = wp_root / "wp-content"
         clean_wpc = clean_root / "wp-content"
         if not clean_wpc.exists():
             return 0
+
+        # Archivos de protección individuales (silence is golden)
         targets = [
             (clean_wpc / "index.php", wp_content / "index.php"),
             (clean_wpc / "plugins" / "index.php", wp_content / "plugins" / "index.php"),
             (clean_wpc / "themes" / "index.php", wp_content / "themes" / "index.php"),
+            (clean_wpc / "upgrade" / "index.php", wp_content / "upgrade" / "index.php"),
         ]
         for src, dst in targets:
             if not src.exists():
                 continue
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                if not dst.exists():
-                    shutil.copy2(str(src), str(dst))
-                    count += 1
+                shutil.copy2(str(src), str(dst))  # sobreescribir siempre
+                count += 1
             except (OSError, PermissionError):
                 pass
+
+        # Restaurar directorio core languages/ (traducciones del sistema WordPress)
+        src_lang = clean_wpc / "languages"
+        dst_lang = wp_content / "languages"
+        if src_lang.exists():
+            try:
+                if not dst_lang.exists():
+                    shutil.copytree(str(src_lang), str(dst_lang))
+                    count += sum(1 for f in src_lang.rglob("*") if f.is_file())
+                else:
+                    # Solo copiar archivos core del paquete limpio que falten
+                    for src_f in src_lang.rglob("*"):
+                        if src_f.is_file():
+                            rel = src_f.relative_to(src_lang)
+                            dst_f = dst_lang / rel
+                            if not dst_f.exists():
+                                try:
+                                    dst_f.parent.mkdir(parents=True, exist_ok=True)
+                                    shutil.copy2(str(src_f), str(dst_f))
+                                    count += 1
+                                except (OSError, PermissionError):
+                                    pass
+            except (OSError, PermissionError, shutil.Error):
+                pass
+
         return count
 
-    def _ensure_default_theme(self, wp_root: Path, clean_root: Path, active_theme: str = ""):
+    def _ensure_default_theme(self, wp_root: Path, clean_root: Path, active_theme: str = "") -> str:
         """v3.2: garantiza que exista al menos un tema instalado. Si el tema activo
         no quedó instalado (premium/no en WP.org) y no hay ningún otro tema, copia
-        el tema por defecto incluido en el core limpio (twentytwenty*)."""
+        el tema por defecto incluido en el core limpio (twentytwenty*).
+
+        Retorna el slug del tema por defecto instalado (o '' si no instaló ninguno).
+        """
         themes_dir = wp_root / "wp-content" / "themes"
         clean_themes = clean_root / "wp-content" / "themes"
 
@@ -282,16 +485,16 @@ class CMSRestorer:
         if active_theme:
             at = themes_dir / active_theme
             if at.is_dir() and at.exists() and any(at.rglob("*.php")):
-                return
+                return ""
 
         # ¿Existe ya algún tema válido (con style.css)?
         if themes_dir.exists():
             for d in themes_dir.iterdir():
                 if d.is_dir() and (d / "style.css").exists():
-                    return
+                    return ""
 
         if not clean_themes.exists():
-            return
+            return ""
         # Copiar el tema por defecto del core (el más reciente twentytwenty*)
         defaults = sorted(
             [d for d in clean_themes.iterdir()
@@ -300,7 +503,7 @@ class CMSRestorer:
         if not defaults:
             defaults = [d for d in clean_themes.iterdir() if d.is_dir()]
         if not defaults:
-            return
+            return ""
         src_theme = defaults[0]
         dst_theme = themes_dir / src_theme.name
         try:
@@ -311,8 +514,10 @@ class CMSRestorer:
             self.log.append({"type": "warning", "cms": "wordpress",
                 "message": f"Tema activo '{active_theme or '?'}' no disponible en WP.org; "
                            f"instalado tema por defecto '{src_theme.name}' para que el sitio cargue"})
+            return src_theme.name
         except (OSError, PermissionError, shutil.Error):
             pass
+        return ""
 
     def _read_wp_active_from_sql(self, sql_path: str) -> tuple:
         active_plugins = set()
@@ -411,7 +616,10 @@ class CMSRestorer:
                     pass
             return None
 
-    def _restore_wp_plugins(self, wp_root: Path, active_plugins: set):
+    def _restore_wp_plugins(self, wp_root: Path, active_plugins: set) -> set:
+        """Reinstala plugins desde WordPress.org. Retorna el set de slugs que
+        quedaron efectivamente instalados (para enforcement posterior)."""
+        installed: set = set()
         plugins_dir = wp_root / "wp-content" / "plugins"
         if not plugins_dir.exists():
             plugins_dir.mkdir(parents=True, exist_ok=True)
@@ -419,7 +627,7 @@ class CMSRestorer:
         # v2.6.4: usar active_plugins directamente — el directorio puede estar
         # vacio si CMSPluginCleaner ya movio los plugins a cuarentena antes
         if not active_plugins:
-            return
+            return installed
         slugs = list(active_plugins)
 
         total = len(slugs)
@@ -464,11 +672,17 @@ class CMSRestorer:
             for fut in _ac(futs):
                 done += 1
                 self.progress_callback("status", f"Descargando plugin {done} de {total}...")
+                slug = futs[fut]
                 entry = fut.result()
                 if entry:
                     self.log.append(entry)
+                    if entry.get("type") == "success":
+                        installed.add(slug)
+        return installed
 
-    def _restore_wp_themes(self, wp_root: Path, theme_slugs, active_theme: str = ""):
+    def _restore_wp_themes(self, wp_root: Path, theme_slugs, active_theme: str = "") -> set:
+        """Reinstala temas desde WordPress.org. Retorna el set de slugs instalados."""
+        installed: set = set()
         themes_dir = wp_root / "wp-content" / "themes"
         if not themes_dir.exists():
             themes_dir.mkdir(parents=True, exist_ok=True)
@@ -480,7 +694,7 @@ class CMSRestorer:
         if active_theme and active_theme not in slugs:
             slugs.append(active_theme)
         if not slugs:
-            return
+            return installed
 
         total = len(slugs)
         from concurrent.futures import ThreadPoolExecutor, as_completed as _ac
@@ -522,9 +736,13 @@ class CMSRestorer:
             for fut in _ac(futs):
                 done += 1
                 self.progress_callback("status", f"Descargando tema {done} de {total}...")
+                slug = futs[fut]
                 entry = fut.result()
                 if entry:
                     self.log.append(entry)
+                    if entry.get("type") == "success":
+                        installed.add(slug)
+        return installed
 
     def _download_and_extract_zip(self, slug: str, url: str, kind: str) -> Path:
         cache_file = self._cache_dir / f"wp-{kind}-{slug}.zip"
@@ -960,9 +1178,13 @@ class CMSRestorer:
     # ─────────────────────────── Utilidades compartidas ───────────────────────────
 
     def _full_rebuild_dirs(self, site_root: Path, clean_root: Path, dirs: list, cms_key: str = "cms") -> int:
-        """Full rebuild: elimina el directorio existente y copia el limpio.
-        Mas agresivo que replace_core_files — garantiza que no queden archivos infectados
-        que el malware haya AGREGADO al core (no solo modificado).
+        """Full rebuild: elimina por completo cada directorio destino y lo repone con
+        la versión limpia. Garantiza que no queden archivos infectados que el malware
+        haya AGREGADO al core (no solo modificado).
+
+        v3.0.3: I/O tolerante a rutas largas de Windows (prefijo \\\\?\\) tanto al borrar
+        como al copiar. Se usa también para reinstalar plugins/temas (dirname=".") cuyos
+        árboles profundos (p.ej. vendor/elementor/...) antes fallaban silenciosamente.
         """
         total_files = 0
         for dirname in dirs:
@@ -977,33 +1199,16 @@ class CMSRestorer:
             if not src_dir.exists():
                 continue
 
-            # Eliminar existente
-            if dst_dir.exists() and dirname != ".":
-                try:
-                    shutil.rmtree(str(dst_dir))
-                except (OSError, PermissionError) as e:
-                    self.log.append({"type": "warning", "cms": cms_key,
-                                   "message": f"No se pudo eliminar {dirname}: {e}"})
-                    continue
+            # Eliminar destino existente por completo (robusto ante rutas largas)
+            if dst_dir.exists():
+                self._robust_rmtree(dst_dir)
 
-            # Copiar limpio
-            try:
-                if dirname == ".":
-                    # v2.6.8 Bug #1: reinstalar el addon COMPLETO (archivos Y subdirs).
-                    # Antes solo copiaba archivos de primer nivel y no creaba el destino
-                    # -> resultaba en 0 archivos. Ahora se limpia el destino y se copia
-                    # el arbol entero del plugin/tema.
-                    if dst_dir.exists():
-                        shutil.rmtree(str(dst_dir), ignore_errors=True)
-                    dst_dir.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(str(src_dir), str(dst_dir))
-                    total_files += sum(1 for f in dst_dir.rglob("*") if f.is_file())
-                else:
-                    shutil.copytree(str(src_dir), str(dst_dir))
-                    total_files += sum(1 for f in src_dir.rglob("*") if f.is_file())
-            except (OSError, PermissionError, shutil.Error) as e:
+            # Copiar limpio (robusto ante rutas largas)
+            n = self._robust_copytree(src_dir, dst_dir)
+            total_files += n
+            if n == 0:
                 self.log.append({"type": "warning", "cms": cms_key,
-                               "message": f"Error copiando {dirname}: {e}"})
+                               "message": f"Sin archivos copiados al reponer '{dirname}'"})
         return total_files
 
     @staticmethod

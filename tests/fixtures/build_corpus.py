@@ -1,0 +1,128 @@
+"""Corpus de prueba versionado y determinista para cPacleanS.
+
+No almacena malware vivo en el repositorio: los payloads viven codificados en
+base64 y se ensamblan en tiempo de ejecucion dentro de un .tar.gz en un
+directorio temporal. Esto evita disparar el antivirus del equipo y mantiene el
+repo limpio, sin perder reproducibilidad (el builder es la fuente versionada).
+
+API:
+  build_clean_backup(dest_dir)    -> ruta .tar.gz (solo archivos legitimos)
+  build_infected_backup(dest_dir) -> ruta .tar.gz (legitimos + muestras inertes)
+  MANIFEST                        -> clasificacion esperada por arcname
+
+CLI: python tests/fixtures/build_corpus.py <dir_salida>
+"""
+from __future__ import annotations
+import base64
+import io
+import os
+import tarfile
+
+# Payloads codificados (inertes). Decodificados solo al construir el tar.
+_B64 = {
+    "webshell_eval": "PD9waHAgZXZhbChiYXNlNjRfZGVjb2RlKCRfUE9TVFsiY21kIl0pKTsgPz4K",
+    "webshell_system": "PD9waHAgc3lzdGVtKCRfR0VUWyJjIl0pOyA/Pgo=",
+    "backdoor_var": "PD9waHAgJHg9ImJhc2U2NF9kZWNvZGUiOyBldmFsKCR4KCJjM2x6ZEdWdEtDSnBaQ0lwT3c9PSIpKTsgPz4K",
+    "htaccess_handler": "QWRkSGFuZGxlciBhcHBsaWNhdGlvbi94LWh0dHBkLXBocCAuanBnIC5naWYgLnBuZwo=",
+    "htaccess_redirect": "UmV3cml0ZUVuZ2luZSBPbgpSZXdyaXRlUnVsZSBeKC4qKSQgaHR0cDovL2V2aWwuZXhhbXBsZS9yIFtSPTMwMSxMXQo=",
+    "sql_inject": "LS0gTXlTUUwgZHVtcApDUkVBVEUgVEFCTEUgd3Bfb3B0aW9ucyAob3B0aW9uX2lkIGJpZ2ludCk7CklOU0VSVCBJTlRPIHdwX3Bvc3RzIFZBTFVFUyAoMSwieCIsIjxzY3JpcHQ+ZXZhbChhdG9iKHgpKTwvc2NyaXB0PiIpOwo=",
+    "wpconfig": "PD9waHAKZGVmaW5lKCJEQl9OQU1FIiwidGVzdGRiIik7CmRlZmluZSgiREJfVVNFUiIsInUiKTsKJHRhYmxlX3ByZWZpeCA9ICJ3cF8iOwo=",
+    "versionphp": "PD9waHAKJHdwX3ZlcnNpb24gPSAiNi40LjIiOwo=",
+    "akismet": "PD9waHAKLyogUGx1Z2luIE5hbWU6IEFraXNtZXQgQW50aS1TcGFtICovCmZ1bmN0aW9uIGFraXNtZXRfY2hlY2soKSB7IHJldHVybiB0cnVlOyB9Cg==",
+    "style": "LyogVGhlbWUgTmFtZTogVHdlbnR5IFR3ZW50eS1Gb3VyICovCmJvZHkgeyBtYXJnaW46IDA7IH0K",
+    "index_stub": "PD9waHAKLy8gU2lsZW5jZSBpcyBnb2xkZW4K",
+    "readme": "VHdlbnR5IFR3ZW50eS1Gb3VyIHRoZW1lLiBMaWNlbnNlIEdQTC4K",
+}
+_EICAR_PARTS = ["WDVPIVAlQEFQWzRcUFpYNTQoUF4p", "N0NDKTd9JEVJQ0FSLVNUQU5EQVJE", "LUFOVElWSVJVUy1URVNULUZJTEUhJEgrSCo="]
+# JPEG minimo valido (cabecera SOI/APP0 + EOI). Archivo legitimo, no debe marcarse.
+_JPEG = bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffd9")
+
+_ROOT = "backup-test/homedir/public_html"
+
+# Archivos legitimos comunes a ambos backups: deben quedar intactos (cero FP).
+_LEGIT = {
+    f"{_ROOT}/wp-config.php": ("wpconfig", "text"),
+    f"{_ROOT}/wp-includes/version.php": ("versionphp", "text"),
+    f"{_ROOT}/wp-content/plugins/akismet/akismet.php": ("akismet", "text"),
+    f"{_ROOT}/wp-content/themes/twentytwentyfour/style.css": ("style", "text"),
+    f"{_ROOT}/wp-content/themes/twentytwentyfour/readme.txt": ("readme", "text"),
+    f"{_ROOT}/wp-content/index.php": ("index_stub", "text"),
+    f"{_ROOT}/index.php": ("index_stub", "text"),
+    f"{_ROOT}/wp-content/uploads/2024/01/photo.jpg": ("__jpeg__", "bin"),
+}
+
+# Muestras de malware inerte esperadas como CONFIRMADAS por cPacleanS.
+_MALWARE = {
+    f"{_ROOT}/shell.php": "webshell_eval",
+    f"{_ROOT}/wp-config-backup.php": "backdoor_var",
+    f"{_ROOT}/wp-content/uploads/2024/01/image.jpg.php": "webshell_system",
+    f"{_ROOT}/wp-content/uploads/.htaccess": "htaccess_handler",
+    f"{_ROOT}/.htaccess": "htaccess_redirect",
+}
+# EICAR: muestra para oraculo externo (AV). cPacleanS es anti-webshell, no AV
+# binario; su deteccion de EICAR no es requisito.
+_EICAR = f"{_ROOT}/wp-content/uploads/eicar.com.txt"
+# Dump SQL con fila inyectada (lo procesa el DBCleaner, no clean_findings).
+_SQL = "backup-test/mysql/testdb.sql"
+
+MANIFEST = {
+    "legit": sorted(_LEGIT.keys()),
+    "malware_confirmed": sorted(_MALWARE.keys()),
+    "eicar": _EICAR,
+    "sql_dump": _SQL,
+}
+
+
+def _content(key: str) -> bytes:
+    if key == "__jpeg__":
+        return _JPEG
+    return base64.b64decode(_B64[key])
+
+
+def _eicar() -> bytes:
+    return b"".join(base64.b64decode(p) for p in _EICAR_PARTS)
+
+
+def _write_tar(path: str, files: dict):
+    with tarfile.open(path, "w:gz") as tar:
+        for arcname, data in files.items():
+            ti = tarfile.TarInfo(name=arcname)
+            ti.size = len(data)
+            tar.addfile(ti, io.BytesIO(data))
+
+
+def _legit_files() -> dict:
+    out = {}
+    for arc, (key, _kind) in _LEGIT.items():
+        out[arc] = _content(key)
+    return out
+
+
+def build_clean_backup(dest_dir: str) -> str:
+    os.makedirs(dest_dir, exist_ok=True)
+    path = os.path.join(dest_dir, "control-limpio.tar.gz")
+    _write_tar(path, _legit_files())
+    return path
+
+
+def build_infected_backup(dest_dir: str) -> str:
+    os.makedirs(dest_dir, exist_ok=True)
+    path = os.path.join(dest_dir, "control-infectado.tar.gz")
+    files = _legit_files()
+    for arc, key in _MALWARE.items():
+        files[arc] = _content(key)
+    files[_EICAR] = _eicar()
+    files[_SQL] = _content("sql_inject")
+    _write_tar(path, files)
+    return path
+
+
+if __name__ == "__main__":
+    import sys
+    out = sys.argv[1] if len(sys.argv) > 1 else "."
+    c = build_clean_backup(out)
+    i = build_infected_backup(out)
+    print("clean   :", c, os.path.getsize(c), "bytes")
+    print("infected:", i, os.path.getsize(i), "bytes")
+    print("legit   :", len(MANIFEST["legit"]), "archivos")
+    print("malware :", len(MANIFEST["malware_confirmed"]), "muestras confirmadas esperadas")

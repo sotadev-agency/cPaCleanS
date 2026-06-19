@@ -717,37 +717,60 @@ class ScanEngine:
         return counts
 
     def extract_iocs(self) -> dict:
-        """v3.1: Extrae indicadores de compromiso (IPs, URLs, dominios) de los findings confirmados."""
+        """v3.2: Extrae indicadores de compromiso (IPs, URLs, dominios) de findings confirmados.
+        Lee también el contenido de los archivos infectados para capturar IoCs embebidos."""
         import re as _re
         _ip = _re.compile(r'\b(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?:\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)){3}\b')
-        _url = _re.compile(r'https?://[^\s\'"<>{}\[\]]{10,120}', _re.IGNORECASE)
+        _url = _re.compile(r'https?://[^\s\'"<>{}\[\]]{6,200}', _re.IGNORECASE)
         _dom = _re.compile(
             r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)'
-            r'+(?:com|net|org|io|ru|cn|tk|xyz|top|info|biz|cc|pw|su|ws|me|co|online)\b',
+            r'+(?:com|net|org|io|ru|cn|tk|xyz|top|info|biz|cc|pw|su|ws|me|co|online'
+            r'|club|site|icu|live|space|fun|link|bid|win|loan|date|racing|review|trade)\b',
             _re.IGNORECASE,
         )
         _PRIVATE = ('127.', '10.', '192.168.', '172.16.', '172.17.',
-                    '172.18.', '172.19.', '172.20.', '0.0.0.0', '255.')
+                    '172.18.', '172.19.', '172.20.', '0.0.0.0', '255.', '169.254.')
         _SAFE_DOMS = frozenset({
             'wordpress.org', 'wp.com', 'github.com', 'php.net', 'google.com',
             'googleapis.com', 'jquery.com', 'jquery.org', 'bootstrapcdn.com',
             'cloudflare.com', 'cloudfront.net', 'amazonaws.com', 'paypal.com',
+            'w3.org', 'schema.org', 'facebook.com', 'twitter.com', 'youtube.com',
+            'gstatic.com', 'gravatar.com', 'woocommerce.com', 'automattic.com',
         })
 
         ips, urls, domains = set(), set(), set()
+        seen_files = set()
+
         for f in self.result.findings:
             if not f.confirmed_malware:
                 continue
+
+            # Extraer IoC del contexto/patrón capturado por el scanner
             text = f"{f.context} {f.matched_pattern} {f.description}"
             ips.update(_ip.findall(text))
             urls.update(_url.findall(text))
             domains.update(_dom.findall(text.lower()))
 
+            # Leer contenido real del archivo para IoCs embebidos (ofuscados o en strings)
+            fp = f.file_path
+            if fp and fp not in seen_files:
+                seen_files.add(fp)
+                try:
+                    fsize = os.path.getsize(fp)
+                    if 0 < fsize < 2_000_000:  # Leer solo archivos < 2MB
+                        with open(fp, "r", encoding="utf-8", errors="replace") as fh:
+                            raw = fh.read(131072)  # Primeros 128KB
+                        ips.update(_ip.findall(raw))
+                        urls.update(_url.findall(raw))
+                        domains.update(_dom.findall(raw.lower()))
+                except (OSError, PermissionError):
+                    pass
+
         public_ips = sorted(ip for ip in ips if not any(ip.startswith(p) for p in _PRIVATE))
         clean_urls = sorted(urls)[:50]
         clean_doms = sorted(
             d for d in domains
-            if d not in _SAFE_DOMS and not any(s in d for s in _SAFE_DOMS)
+            if d not in _SAFE_DOMS and not any(sd in d for sd in _SAFE_DOMS)
         )[:30]
 
         self.result.iocs = {"ips": public_ips, "urls": clean_urls, "domains": clean_doms}

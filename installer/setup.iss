@@ -1,9 +1,9 @@
-; Inno Setup Script — cPacleanS v3.0.0
+; Inno Setup Script — cPacleanS v3.0.2
 ; Editor: Sota Studio Web | https://sotastudioweb.com
 ; Descargar Inno Setup 6: https://jrsoftware.org/isinfo.php
 
 #define MyAppName        "cPacleanS"
-#define MyAppVersion     "3.0.0"
+#define MyAppVersion     "3.0.2"
 #define MyAppPublisher   "Sota Studio Web"
 #define MyAppURL         "https://github.com/sotadev-agency/cPaCleanS"
 #define MyAppSupportURL  "https://github.com/sotadev-agency/cPaCleanS/issues"

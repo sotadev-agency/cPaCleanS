@@ -15,7 +15,7 @@ Claude cobra por tokens (texto procesado). Cuanto mas preciso y corto sea tu rep
 ## Plantilla para reportar FALLAS (copiar y pegar)
 
 ```
-BUG cPacleanS v2.0.0
+BUG cPacleanS v3.1.0
 
 QUE: [descripcion en 1 linea]
 CUANDO: [que estabas haciendo exactamente]
@@ -30,7 +30,7 @@ REPRODUCE: [siempre / a veces / solo una vez]
 ### Ejemplo real:
 
 ```
-BUG cPacleanS v2.0.0
+BUG cPacleanS v3.1.0
 
 QUE: PDF se genera vacio (0 KB)
 CUANDO: despues de escanear backup de Joomla
@@ -124,7 +124,7 @@ ARCHIVOS AFECTADOS: src/report/generator.py, src/gui/app.py
 Primer mensaje ideal (minimo contexto, maximo resultado):
 
 ```
-Proyecto: cPacleanS v2.0.0
+Proyecto: cPacleanS v3.1.0
 Ruta: C:\Users\SSW\Documents\limpiador_malware
 Stack: Python + CustomTkinter + PyInstaller
 

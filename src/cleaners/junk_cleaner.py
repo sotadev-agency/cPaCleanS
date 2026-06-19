@@ -69,6 +69,34 @@ _SKIP_DIRS = frozenset([
     "cuarentena", "cache", "upgrade",
 ])
 
+# Carpetas ocultas / de respaldo que NO pertenecen al webroot legítimo y son
+# frecuentes como artefactos de malware o residuos de servidores comprometidos.
+_SUSPICIOUS_DIRS = frozenset([
+    ".backup", ".tmb", ".old", ".tmp", ".bak", ".saved",
+    ".trash", ".disabled", ".hidden", ".x", ".data",
+    ".quarantine2", ".htpasswd_backup", ".restore",
+])
+
+# Regex para detectar nombres de archivo PHP con componente aleatoria / ofuscada.
+# Ejemplos: 6tzrlwycdcyfhk9m86tCdefault.php, a1b2c3d4e5.php, xyz123abc456.php
+# Patrón: 8+ chars de mezcla alfanumérica sin consonante/vocal legible + ext .php
+_RANDOM_PHP_RE = re.compile(
+    r'^(?:'
+    r'[a-z0-9]{3,}[0-9]{2,}[a-z]{2,}[0-9]{1,}[a-z0-9]*'   # dígitos intercalados: 6tz...86t
+    r'|[a-f0-9]{16,}'                                          # hex puro
+    r'|[a-z0-9]{12,}'                                          # 12+ alfanumérico sin guiones/palabras
+    r')(?:default|main|config|admin|index|core|wp|base|cache|log|tmp|temp)?'
+    r'\.php(?:5|7)?$',
+    re.IGNORECASE,
+)
+
+# Palabras que hacen legítimo un nombre (plugins, temas, proyectos propios)
+_LEGIT_INDICATORS = frozenset([
+    "woocommerce", "contact", "akismet", "yoast", "jetpack", "elementor",
+    "gutenberg", "classic", "hello", "twentytwenty", "twentyone", "twentytwo",
+    "twentythree", "loader", "autoload", "bootstrap", "functions",
+])
+
 # Intentar importar magic para MIME detection
 try:
     import magic
@@ -153,6 +181,17 @@ class JunkCleaner:
                 # podar directorios que no se exploran (dependencias/core/cuarentena)
                 dirs[:] = [d for d in dirs if d.lower() not in _SKIP_DIRS]
                 root_path = Path(root)
+
+                # Detectar carpetas sospechosas antes de explorar su contenido
+                suspicious_subdirs = [d for d in dirs if d.lower() in _SUSPICIOUS_DIRS]
+                for sd in suspicious_subdirs:
+                    dir_path = root_path / sd
+                    dstr = str(dir_path)
+                    if dstr not in self._handled and dir_path.exists():
+                        self._handled.add(dstr)
+                        results.append(self._handle_suspicious_dir(dir_path, "suspicious_dir"))
+                        dirs.remove(sd)  # no explorar internamente, ya está en cuarentena
+
                 for fname in files:
                     fpath = root_path / fname
                     spath = str(fpath)
@@ -165,6 +204,39 @@ class JunkCleaner:
             # carpetas vacías (tras mover archivos)
             results.extend(self._quarantine_empty_dirs(webroot))
         return results
+
+    def _handle_suspicious_dir(self, dir_path: Path, category: str) -> dict:
+        """Mueve o elimina una carpeta sospechosa completa preservando la ruta relativa."""
+        try:
+            rel_path = str(dir_path.relative_to(self.extract_dir))
+        except ValueError:
+            rel_path = str(dir_path)
+
+        entry = {"path": rel_path, "cms": "-", "category": category, "action": "logged_only"}
+
+        if self.clean_mode == SCAN_MODE_ONLY:
+            return entry
+
+        if self.clean_mode == CLEAN_MODE_STRICT:
+            try:
+                shutil.rmtree(str(dir_path), ignore_errors=True)
+                entry["action"] = "deleted"
+            except (OSError, PermissionError):
+                pass
+            return entry
+
+        # normal/intermediate: mover a cuarentena
+        try:
+            dest = self._junk_dir / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                import time as _t
+                dest = dest.parent / f"{dest.name}_{int(_t.time())}"
+            shutil.move(str(dir_path), str(dest))
+            entry["action"] = "quarantined"
+        except (OSError, PermissionError, shutil.Error):
+            pass
+        return entry
 
     def _classify_residual(self, fpath: Path, webroot: Path) -> str:
         """Clasifica un archivo como residuo no vital, o '' si es legítimo."""
@@ -193,6 +265,13 @@ class JunkCleaner:
         # 5. Copias de seguridad / temporales de editores
         if suffix in _BACKUP_EXTS or _BACKUP_NAME_RE.search(name):
             return "backup_leftover"
+
+        # 6. PHP con nombre aleatorio/ofuscado (no pertenece a ningún CMS ni proyecto legítimo)
+        # Ej: 6tzrlwycdcyfhk9m86tCdefault.php, a1b2c3d4e5f6.php
+        if suffix == ".php" and _RANDOM_PHP_RE.match(name_lower):
+            # Excluir si el nombre contiene una palabra reconocible de plugin/tema
+            if not any(ind in name_lower for ind in _LEGIT_INDICATORS):
+                return "obfuscated_php"
 
         return ""
 

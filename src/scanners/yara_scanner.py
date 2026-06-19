@@ -1,5 +1,4 @@
 """Escáner YARA — usa reglas compiladas para detección avanzada."""
-import os
 from pathlib import Path
 from ..core.engine import Finding
 

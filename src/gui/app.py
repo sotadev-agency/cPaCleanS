@@ -1,7 +1,6 @@
-"""Interfaz gráfica de cPacleanS v3.1 — diseño profesional con tracker de fases."""
+"""Interfaz gráfica de cPacleanS v3.0.2 — diseño profesional con tracker de fases."""
 import os
 import re
-import sys
 import threading
 import traceback
 import webbrowser
@@ -75,6 +74,20 @@ PHASES = [
     (9, "Empaquetar"),
 ]
 
+# Peso relativo de cada fase sobre el total del proceso (suma ≈ 100)
+PHASE_WEIGHTS = {
+    0: 0.5,   # Validar: instantáneo
+    1: 10.0,  # Extraer: proporcional al tamaño
+    2: 1.0,   # Pre-scan: cuarentena rápida
+    3: 35.0,  # Escaneo: la fase más larga
+    4: 5.0,   # Enriquecimiento: VT + IoC
+    5: 8.0,   # Limpieza: mover archivos
+    6: 25.0,  # Restaurar CMS: descarga de repos
+    7: 8.0,   # BD + junk
+    8: 3.0,   # Reportes
+    9: 4.5,   # Empaquetar
+}
+
 
 class CpacleanSApp(ctk.CTk):
     def __init__(self):
@@ -100,6 +113,12 @@ class CpacleanSApp(ctk.CTk):
         # Phase tracker widgets
         self._phase_icons  = {}
         self._phase_labels = {}
+
+        # Timing / progreso global
+        self._scan_start_time = 0.0
+        self._current_phase = -1
+        self._phase_start_time = 0.0
+        self._phase_progress = 0  # 0-100 dentro de la fase actual
 
         self._build_ui()
 
@@ -332,7 +351,7 @@ class CpacleanSApp(ctk.CTk):
 
         # Progress bar
         pb_frame = ctk.CTkFrame(bottom, fg_color="transparent")
-        pb_frame.pack(fill="x", padx=16, pady=(8, 2))
+        pb_frame.pack(fill="x", padx=16, pady=(8, 0))
 
         self.progress_bar = ctk.CTkProgressBar(pb_frame, height=5,
                                                fg_color=BG_CARD,
@@ -340,9 +359,18 @@ class CpacleanSApp(ctk.CTk):
         self.progress_bar.pack(fill="x")
         self.progress_bar.set(0)
 
+        # Fila de ETA / porcentaje de fase
+        eta_row = ctk.CTkFrame(bottom, fg_color="transparent")
+        eta_row.pack(fill="x", padx=16, pady=(2, 0))
+
+        self.eta_label = ctk.CTkLabel(eta_row, text="",
+                                       font=ctk.CTkFont(family="Consolas", size=9),
+                                       text_color=T_MUT, anchor="w")
+        self.eta_label.pack(side="left")
+
         # Status + metrics + buttons
         meta_row = ctk.CTkFrame(bottom, fg_color="transparent")
-        meta_row.pack(fill="x", padx=16, pady=(4, 10))
+        meta_row.pack(fill="x", padx=16, pady=(2, 8))
 
         self.status_label = ctk.CTkLabel(meta_row, text="Listo",
                                           font=ctk.CTkFont(size=10),
@@ -390,6 +418,7 @@ class CpacleanSApp(ctk.CTk):
 
     def _set_phase(self, num: int, status: str):
         """Actualiza el indicador de fase en el sidebar. Llama desde hilo de scan."""
+        import time as _t
         icon_map = {
             "pending": ("○", T_MUT),
             "running": ("▶", CYAN),
@@ -398,7 +427,12 @@ class CpacleanSApp(ctk.CTk):
             "skip":    ("–", T_MUT),
         }
         icon, color = icon_map.get(status, ("○", T_MUT))
+        if status == "running":
+            self._current_phase = num
+            self._phase_start_time = _t.time()
+            self._phase_progress = 0
         self.after(0, lambda i=num, ic=icon, cl=color: self._update_phase_widget(i, ic, cl))
+        self.after(0, self._refresh_eta)
 
     def _update_phase_widget(self, num, icon, color):
         if num in self._phase_icons:
@@ -498,9 +532,80 @@ class CpacleanSApp(ctk.CTk):
 
     def _update_progress(self, t, v):
         if t == "progress":
+            self._phase_progress = int(v)
             self.progress_bar.set(v / 100)
+            self._refresh_eta()
         elif t == "status":
             self.status_label.configure(text=str(v))
+
+    def _tick_eta(self):
+        """Ticker de 1 s que mantiene vivo el ETA aunque la fase no emita progreso.
+        Las fases 4-8 solo emiten 'status' (sin 'progress'); sin este ticker el
+        tiempo transcurrido quedaría congelado y el estimado nunca se recalcularía."""
+        if not self._is_running:
+            return
+        self._refresh_eta()
+        # reprogramar cada segundo mientras el escaneo siga corriendo
+        self.after(1000, self._tick_eta)
+
+    def _refresh_eta(self):
+        """Actualiza el label de porcentaje global y tiempo estimado."""
+        import time as _t
+        if not self._is_running or self._current_phase < 0:
+            self.eta_label.configure(text="")
+            return
+
+        # % global completado: suma de pesos de fases anteriores + fracción de la actual.
+        # Para fases sin señal de progreso granular, interpola por tiempo dentro de
+        # la fase usando una duración típica estimada, así el % nunca se estanca.
+        completed_weight = sum(
+            w for p, w in PHASE_WEIGHTS.items() if p < self._current_phase
+        )
+        current_weight = PHASE_WEIGHTS.get(self._current_phase, 0)
+        total_weight = sum(PHASE_WEIGHTS.values()) or 1.0
+
+        phase_frac = self._phase_progress / 100.0
+        # Si la fase no reporta progreso (sigue en 0) pero lleva tiempo corriendo,
+        # interpola suavemente hacia ~90% según el tiempo en la fase (evita "0%" fijo).
+        if self._phase_progress <= 0 and self._phase_start_time:
+            in_phase = max(0.0, _t.time() - self._phase_start_time)
+            # curva asintótica: se acerca a 0.9 sin superarlo (no sabemos el real)
+            phase_frac = min(0.9, in_phase / (in_phase + 20.0))
+
+        global_pct = (completed_weight + current_weight * phase_frac) / total_weight * 100
+        global_pct = min(99.0, max(0.0, global_pct))
+
+        # Tiempo transcurrido y estimación
+        elapsed = _t.time() - self._scan_start_time
+        elapsed_str = self._fmt_seconds(int(elapsed))
+
+        # Mostrar "calculando" solo los primeros segundos; luego siempre un estimado.
+        if elapsed >= 4.0 and global_pct >= 1.0:
+            total_est = elapsed / (global_pct / 100.0)
+            remaining = max(0, total_est - elapsed)
+            eta_str = f"~{self._fmt_seconds(int(remaining))} restantes"
+        else:
+            eta_str = "estimando tiempo…"
+
+        phase_name = PHASES[self._current_phase][1] if self._current_phase < len(PHASES) else ""
+        label = (
+            f"Fase {self._current_phase + 1}/10 [{phase_name}]"
+            f"  —  {global_pct:.0f}% completado"
+            f"  —  {elapsed_str} transcurrido"
+            f"  —  {eta_str}"
+        )
+        self.eta_label.configure(text=label)
+
+    @staticmethod
+    def _fmt_seconds(secs: int) -> str:
+        if secs < 60:
+            return f"{secs}s"
+        elif secs < 3600:
+            return f"{secs // 60}min {secs % 60}s"
+        else:
+            h = secs // 3600
+            m = (secs % 3600) // 60
+            return f"{h}h {m}min"
 
     def _update_badges(self, result):
         s = result.summary_by_severity
@@ -519,20 +624,26 @@ class CpacleanSApp(ctk.CTk):
             messagebox.showerror("Error", "Seleccione un archivo de backup válido.")
             return
 
+        import time as _t
         self._critical_only = self.critical_only_var.get()
         self._lock_ui()
         self._reset_phases()
         self.log_text.delete("1.0", "end")
         self.progress_bar.set(0)
+        self.eta_label.configure(text="")
         self._report_path = None
         self._pdf_path = None
         self._json_path = None
+        self._scan_start_time = _t.time()
+        self._current_phase = -1
+        self._phase_progress = 0
         for b in (self._badge_crit, self._badge_high, self._badge_med, self._badge_low):
             pass  # badges keep last scan values until new scan starts
 
         self._scan_thread = threading.Thread(
             target=self._run_scan, args=(backup_path,), daemon=True)
         self._scan_thread.start()
+        self._tick_eta()  # arrancar ticker de tiempo estimado (1 s)
 
     def _run_scan(self, backup_path: str):
         try:
@@ -950,6 +1061,8 @@ class CpacleanSApp(ctk.CTk):
     def _scan_finished(self):
         self._unlock_ui()
         self.progress_bar.set(1.0)
+        self._current_phase = -1
+        self.eta_label.configure(text="")
 
         if self._report_path:
             self.report_btn.configure(state="normal")

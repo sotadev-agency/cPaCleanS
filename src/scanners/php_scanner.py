@@ -17,6 +17,8 @@ PHP_PATTERNS = [
     ("critical", "webshell", r'\$\w+\s*=\s*(?:chr\(\d+\)\s*\.?\s*){10,}', "Construcción de string por chr() encadenados"),
     ("critical", "backdoor", r'(system|exec|passthru|shell_exec|popen|proc_open)\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)', "Ejecución de comandos desde input del usuario"),
     ("critical", "backdoor", r'<\?php\s+\$\w{1,3}\s*=\s*["\'][\w+/=]{50,}["\'];\s*(eval|assert)', "Backdoor ofuscado en base64"),
+    ("critical", "backdoor", r'\b(?:eval|assert)\s*\(\s*\$\w+\s*\(', "eval/assert sobre funcion variable (backdoor por indireccion)"),
+    ("high", "obfuscation", r'\$\w+\s*=\s*["\'](?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|create_function|assert|system|exec|shell_exec|passthru|popen|proc_open)["\']\s*;', "Nombre de funcion peligrosa asignado a variable (ofuscacion)"),
 
     # Inyecciones y código sospechoso
     ("high", "injection", r'\b(eval|assert)\s*\(\s*["\']', "Eval/assert con string literal"),

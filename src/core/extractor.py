@@ -77,17 +77,26 @@ class BackupExtractor:
                     # Revisar hasta 500 entradas para detectar estructura cPanel
                     sample = members[:500]
                     top_dirs = set()
+                    second_dirs = set()
                     for m in sample:
                         parts = m.replace("\\", "/").lstrip("/").split("/")
                         if len(parts) >= 2:
                             top_dirs.add(parts[0].lower())
+                            second_dirs.add(parts[1].lower())
                         elif len(parts) == 1 and parts[0]:
                             top_dirs.add(parts[0].lower())
                     matches = top_dirs & cls._VALID_CPANEL_PATHS
-                    result["has_homedir"] = bool({"homedir", "public_html"} & top_dirs)
+                    nested = not matches and bool(second_dirs & cls._VALID_CPANEL_PATHS)
+                    if nested:
+                        matches = second_dirs & cls._VALID_CPANEL_PATHS
+                    result["has_homedir"] = bool(
+                        {"homedir", "public_html"} & top_dirs or
+                        {"homedir", "public_html"} & second_dirs
+                    )
                     if matches:
                         result["valid"] = True
-                        result["reason"] = f"Estructura cPanel detectada: {', '.join(sorted(matches))}"
+                        label = "anidada — " if nested else ""
+                        result["reason"] = f"Estructura cPanel detectada ({label}{', '.join(sorted(matches))})"
                     else:
                         result["reason"] = (
                             "No se detectó estructura cPanel (homedir, public_html, mysql, etc.). "
@@ -97,9 +106,19 @@ class BackupExtractor:
                 with zipfile.ZipFile(str(bp), "r") as zf:
                     members = zf.namelist()
                     result["file_count"] = len(members)
-                    top_dirs = {m.replace("\\", "/").split("/")[0].lower() for m in members[:500]}
+                    sample500 = members[:500]
+                    top_dirs = {m.replace("\\", "/").split("/")[0].lower() for m in sample500}
+                    second_dirs = {
+                        m.replace("\\", "/").split("/")[1].lower()
+                        for m in sample500 if len(m.replace("\\", "/").split("/")) >= 2
+                    }
                     matches = top_dirs & cls._VALID_CPANEL_PATHS
-                    result["has_homedir"] = bool({"homedir", "public_html"} & top_dirs)
+                    if not matches:
+                        matches = second_dirs & cls._VALID_CPANEL_PATHS
+                    result["has_homedir"] = bool(
+                        {"homedir", "public_html"} & top_dirs or
+                        {"homedir", "public_html"} & second_dirs
+                    )
                     result["valid"] = bool(matches)
                     result["reason"] = (
                         f"Estructura ZIP cPanel: {', '.join(sorted(matches))}" if matches
@@ -294,12 +313,21 @@ class BackupExtractor:
         domains = []
         seen = set()
 
+        # Dominio real: etiquetas + TLD alfabético 2-24. Rechaza nombres de BD,
+        # 'public_html', rutas y prefijos de tabla aunque tengan puntos.
+        _dom_re = re.compile(
+            r'^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$')
+        _non_domain = {"public_html", "www", "htdocs", "localhost",
+                       "wp-content", "homedir", "localhost.localdomain"}
+
         def _add(d):
             d = (d or "").strip().strip("'\"").lower()
             d = d.split("://")[-1].split("/")[0].split(":")[0]
             if d.startswith("www."):
                 d = d[4:]
-            if d and "." in d and d not in seen and not d.replace(".", "").isdigit():
+            if (d and d not in seen and d not in _non_domain
+                    and not d.replace(".", "").isdigit()
+                    and _dom_re.match(d)):
                 seen.add(d)
                 domains.append(d)
                 return True

@@ -10,7 +10,7 @@ v2.6.7: el PDF se rediseña siguiendo la estructura del "Informe de limpieza":
   7. Recomendaciones segun hallazgos
   8. Garantia de 30 dias post-limpieza
 """
-import os
+import re
 from datetime import datetime
 from pathlib import Path
 from jinja2 import Environment
@@ -538,24 +538,57 @@ class ReportGenerator:
 
     # ───────────────────────── Helpers PDF (v2.6.7) ──────────────────────────
 
-    @staticmethod
-    def _domains_from_result(result: ScanResult) -> list:
-        """Reune los dominios conocidos desde varias fuentes del resultado."""
+    # Regex de dominio real: etiqueta(s) + TLD alfabético de 2-24 chars.
+    # Rechaza nombres de BD, "public_html", prefijos de tabla, rutas, etc.
+    _DOMAIN_RE = re.compile(
+        r'^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$',
+        re.IGNORECASE,
+    )
+    # Etiquetas que NUNCA son dominios aunque tengan forma sospechosa
+    _NON_DOMAIN_LABELS = frozenset({
+        "public_html", "www", "htdocs", "principal", "sitio", "localhost",
+        "wp-content", "homedir", "example.com", "localhost.localdomain",
+    })
+
+    @classmethod
+    def _is_real_domain(cls, value: str) -> bool:
+        """True solo si value es un nombre de dominio válido (no BD, no carpeta)."""
+        d = (value or "").strip().strip("'\"").lower()
+        d = d.split("://")[-1].split("/")[0].split(":")[0]
+        if d.startswith("www."):
+            d = d[4:]
+        if not d or d in cls._NON_DOMAIN_LABELS:
+            return False
+        if d.replace(".", "").isdigit():   # IPs no son dominios aquí
+            return False
+        return bool(cls._DOMAIN_RE.match(d))
+
+    @classmethod
+    def _domains_from_result(cls, result: ScanResult) -> list:
+        """Reune SOLO dominios reales desde varias fuentes del resultado.
+
+        Issue v3.0.2 #2: campos `domain` de logs de BD/plugins pueden contener
+        nombres de base de datos o etiquetas de carpeta ('public_html'). Se valida
+        cada candidato contra un patrón de dominio real para no confundir al cliente.
+        """
         domains = []
         seen = set()
 
         def _add(d):
             d = (d or "").strip()
-            if d and d not in seen:
-                seen.add(d)
+            if not d or not cls._is_real_domain(d):
+                return
+            key = d.lower()
+            if key not in seen:
+                seen.add(key)
                 domains.append(d)
 
-        # v3.2: el dominio principal del hosting (de userdata/main) es la fuente
-        # autoritativa — va primero para que aparezca como dominio en los reportes.
+        # Fuente autoritativa: dominio principal del hosting (de userdata/main).
         _add(getattr(result, "main_domain", "") or "")
         for d in getattr(result, "all_domains", None) or []:
             _add(d)
 
+        # Fuentes secundarias: solo aportan si pasan la validación de dominio.
         gp = getattr(result, "generated_passwords", None) or {}
         for it in gp.get("wordpress", []) or []:
             _add(it.get("domain"))
@@ -566,8 +599,8 @@ class ReportGenerator:
         for e in getattr(result, "plugins_temas_log", None) or []:
             _add(e.get("domain"))
         if not domains:
-            _add("principal")
-        return domains
+            _add("principal")  # no pasará la validación → lista queda vacía
+        return domains or ["principal"]
 
     @staticmethod
     def _mc(pdf, h, text):
@@ -888,7 +921,7 @@ class ReportGenerator:
         "•": "-", "●": "-", "·": "-",        # • ● ·
         "→": "->", "←": "<-", "⇒": "=>",     # → ← ⇒
         "✅": "[OK]", "✔": "[OK]", "❌": "[X]", # ✅ ✔ ❌
-        "‘": "'", " ": " ",                        # nbsp
+        " ": " ",  # nbsp (espacio duro)
     }
 
     @staticmethod

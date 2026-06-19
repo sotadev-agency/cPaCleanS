@@ -72,7 +72,8 @@ class BackupPackager:
                 return None
             return tarinfo
 
-        with tarfile.open(output_path, "w:gz", compresslevel=6) as tar:
+        with tarfile.open(output_path, "w:gz", compresslevel=6,
+                          format=tarfile.GNU_FORMAT) as tar:
             for i, item in enumerate(items_to_pack):
                 try:
                     arcname = os.path.join(cpanel_user, item.name)
@@ -116,7 +117,8 @@ class BackupPackager:
         total = len(all_files)
         self.progress_callback("status", f"Comprimiendo {total} archivos...")
 
-        with tarfile.open(output_path, "w:gz", compresslevel=6) as tar:
+        with tarfile.open(output_path, "w:gz", compresslevel=6,
+                          format=tarfile.GNU_FORMAT) as tar:
             for i, fp in enumerate(all_files):
                 try:
                     arcname = os.path.relpath(fp, source)
@@ -174,7 +176,8 @@ class BackupPackager:
             included_count = 0
             cb("status", f"Empaquetando homedir ({len(included_paths)} dirs)...")
 
-            with tarfile.open(homedir_tar, "w:gz", compresslevel=6) as tar:
+            with tarfile.open(homedir_tar, "w:gz", compresslevel=6,
+                              format=tarfile.GNU_FORMAT) as tar:
                 for rel_path in included_paths:
                     full = homedir / rel_path
                     if not full.exists():
