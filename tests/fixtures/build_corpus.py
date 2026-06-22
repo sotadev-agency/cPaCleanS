@@ -32,6 +32,13 @@ _B64 = {
     "style": "LyogVGhlbWUgTmFtZTogVHdlbnR5IFR3ZW50eS1Gb3VyICovCmJvZHkgeyBtYXJnaW46IDA7IH0K",
     "index_stub": "PD9waHAKLy8gU2lsZW5jZSBpcyBnb2xkZW4K",
     "readme": "VHdlbnR5IFR3ZW50eS1Gb3VyIHRoZW1lLiBMaWNlbnNlIEdQTC4K",
+    # Valor serializado de wp_options.cron con hook inseguro (URL .php + token
+    # base64_decode SIN parentesis: dispara _CRON_SUSPICIOUS para el endurecimiento
+    # pero NO el patron critico/sospechoso de _process_line). Inerte, no ejecutable.
+    "cron_evil": ("YToxOntpOjE2OTk5OTk5OTk7YToxOntzOjEyOiJldmlsX2Nyb25qb2IiO2E6Mzp7"
+                  "czo4OiJzY2hlZHVsZSI7czo2OiJob3VybHkiO3M6NDoiYXJncyI7YToxOntpOjA7"
+                  "czozMDoiaHR0cDovL2V2aWwuZXhhbXBsZS94LnBocCBiYXNlNjRfZGVjb2RlIjt9"
+                  "fX19"),
 }
 _EICAR_PARTS = ["WDVPIVAlQEFQWzRcUFpYNTQoUF4p", "N0NDKTd9JEVJQ0FSLVNUQU5EQVJE", "LUFOVElWSVJVUy1URVNULUZJTEUhJEgrSCo="]
 # JPEG minimo valido (cabecera SOI/APP0 + EOI). Archivo legitimo, no debe marcarse.
@@ -115,6 +122,94 @@ def build_infected_backup(dest_dir: str) -> str:
     files[_SQL] = _content("sql_inject")
     _write_tar(path, files)
     return path
+
+
+# ─────────────── Dump SQL WordPress (cobertura DBCleaner) v3.1.3 ───────────────
+# Filas legitimas + filas maliciosas inertes para ejercitar DBCleaner y
+# SpamPostCleaner. El unico fragmento sensible (valor cron) viaja en base64
+# (_B64['cron_evil']); el resto es SQL benigno (sin firmas crudas). Cada INSERT
+# va en UNA sola linea (los cleaners procesan por linea). Prefijo wp_.
+
+# Expectativas que el limpiador debe cumplir sobre el dump (para asserts).
+SQL_DUMP_EXPECT = {
+    "users_kept_login": "oldadmin",                        # id=1 mas antiguo: conservar
+    "users_removed_logins": ["admin123", "deadbeefcafe"],  # peligrosos: eliminar
+    "posts_kept_ids": [10, 11],                            # page protegida + post legitimo
+    "posts_removed_id": 12,                                # spam casino/viagra
+    "comments_kept_id": 1,
+    "comments_removed_id": 2,                              # phishing
+    "statistics_kept_id": 1,                               # fila legitima (tabla no protegida)
+    "statistics_removed_id": 2,                            # fila critica (CONCAT 0x..)
+    "cron_neutralized": "a:0:{}",
+    "user_pass_literal": "5f4dcc3b5aa765d61d8327deb882cf99",  # debe desaparecer
+}
+
+
+def _post_tuple(pid, content, title, ptype, ccount):
+    """23 campos estandar de wp_posts (orden mysqldump)."""
+    f = [str(pid), "1", "'2024-01-01 00:00:00'", "'2024-01-01 00:00:00'",
+         f"'{content}'", f"'{title}'", "''", "'publish'", "'closed'",
+         "'closed'", "''", f"'slug-{pid}'", "''", "''",
+         "'2024-01-01 00:00:00'", "'2024-01-01 00:00:00'", "''", "0",
+         f"'http://example.com/?p={pid}'", "0", f"'{ptype}'", "''", str(ccount)]
+    return "(" + ",".join(f) + ")"
+
+
+def _user_tuple(uid, login, registered):
+    """10 campos estandar de wp_users (pass = md5('password'))."""
+    f = [str(uid), f"'{login}'", "'5f4dcc3b5aa765d61d8327deb882cf99'",
+         f"'{login}'", f"'{login}@example.com'", "''", f"'{registered}'",
+         "''", "0", f"'{login}'"]
+    return "(" + ",".join(f) + ")"
+
+
+def _comment_tuple(cid, post_id, url, content):
+    """15 campos estandar de wp_comments."""
+    f = [str(cid), str(post_id), "'visitor'", "'v@example.com'", f"'{url}'",
+         "'127.0.0.1'", "'2024-01-01 00:00:00'", "'2024-01-01 00:00:00'",
+         f"'{content}'", "0", "'1'", "''", "''", "0", "0"]
+    return "(" + ",".join(f) + ")"
+
+
+def wp_sql_dump_text() -> str:
+    """Genera el texto del dump WP de prueba (determinista)."""
+    cron_val = _content("cron_evil").decode("utf-8")
+    # Fila critica de SQL injection: CONCAT(0x..) con >20 hex (inerte, sin webshell
+    # literal). Tabla wp_statistics: prefijo wp_ pero NO protegida.
+    concat = "CONCAT(0x3c3f7068702073797374656d28245f4745545b78 ,0x29)"
+    lines = [
+        "-- cPacleanS fixture dump (inerte)",
+        ("INSERT INTO `wp_options` (option_id, option_name, option_value, autoload) "
+         "VALUES (1,'siteurl','http://example.com','yes'),"
+         f"(2,'cron','{cron_val}','yes');"),
+        ("INSERT INTO `wp_users` VALUES "
+         + _user_tuple(1, "oldadmin", "2019-01-01 00:00:00") + ","
+         + _user_tuple(2, "admin123", "2023-05-05 00:00:00") + ","
+         + _user_tuple(3, "deadbeefcafe", "2023-06-06 00:00:00") + ";"),
+        # Spam en PRIMERA posicion: regresion del fix v3.1.3 (_extract_post_rows).
+        ("INSERT INTO `wp_posts` VALUES "
+         + _post_tuple(12, "Best online casino bonus and cheap viagra pills order now",
+                       "Hot deals", "post", 0) + ","
+         + _post_tuple(10, "About this site", "About", "page", 0) + ","
+         + _post_tuple(11, "Welcome to my blog about gardening and cooking tips",
+                       "My blog", "post", 0) + ";"),
+        ("INSERT INTO `wp_comments` VALUES "
+         + _comment_tuple(1, 11, "", "Great article thanks for sharing") + ","
+         + _comment_tuple(2, 11, "http://spam.example",
+                          "verify your account login to claim your prize") + ";"),
+        ("INSERT INTO `wp_statistics` VALUES "
+         "(1,'normal visit data'),"
+         f"(2,'payload {concat} end');"),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def build_wp_sql_dump(path: str) -> str:
+    """Escribe el dump en `path` y retorna el texto generado."""
+    text = wp_sql_dump_text()
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return text
 
 
 if __name__ == "__main__":

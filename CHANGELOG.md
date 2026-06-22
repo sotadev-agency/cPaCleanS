@@ -2,6 +2,62 @@
 
 Versionado semantico. Formato: cambios por version, mas recientes arriba.
 
+## v3.1.3 (2026-06-21)
+
+Cobertura de los cleaners de BD (antes sin pruebas) y correccion de un hueco de
+deteccion encontrado al escribirlas. Regla de cero falsos positivos intacta.
+
+Fix (deteccion)
+- src/cleaners/db_cleaner.py `_extract_post_rows`: el regex no consumia `VALUES`,
+  por lo que "VALUES " contaminaba la PRIMERA tupla de cada INSERT de wp_posts y
+  `_parse_post_tuple` la descartaba (ID 0). Resultado: el primer post de cada INSERT
+  nunca se analizaba para spam. Ahora consume la lista de columnas opcional y VALUES,
+  igual que `_collect_wp_users` / `_extract_comment_rows` / `_delete_tuples_by_id`.
+  Solo mejora la recall; no puede borrar contenido legitimo (umbral de spam intacto).
+
+Pruebas (nuevas, +17 => 31 total)
+- tests/test_db_cleaner.py: parsing SQL (_split_sql_values / _split_value_tuples con
+  comillas simples/dobles, comas y parentesis dentro de strings); scoring
+  SpamPostCleaner (post_type seguro omitido, spam eliminado, scan_only sin borrar,
+  post legitimo intacto, proteccion por comentarios con score moderado, comentario
+  phishing); integracion DBCleaner.process() sobre un dump WP (spam, fila critica
+  CONCAT(0x..), usuarios peligrosos conservando el mas antiguo + pass regenerada,
+  cron neutralizado a a:0:{}) con filas legitimas intactas; regresion del fix:
+  el post spam en PRIMERA posicion se extrae y se elimina (sin el fix, 2 fallos).
+- tests/fixtures/build_corpus.py: `build_wp_sql_dump()` genera el dump determinista.
+  Unico fragmento sensible (valor cron) en base64 (`_B64['cron_evil']`); resto SQL
+  benigno. Convencion anti-AV respetada (cero firmas crudas en el repo).
+- verify.py: 4/4 PASS (compile, import, lint_lite 0, unittest 31/31) en copia /tmp.
+
+## v3.1.2 (2026-06-20)
+
+Recuperacion REAL de la suite de pruebas y causa raiz identificada. Sin cambios en
+el motor ni en el scoring (regla de cero falsos positivos intacta).
+
+Causa raiz (resuelta)
+- La suite desaparecia del disco cada sesion porque el antivirus del equipo
+  cuarentena los archivos que contienen firmas crudas tipo webshell. Por eso
+  build_corpus.py (payloads en base64, ensamblados en runtime) si persistia, pero
+  test_cpacleans.py y la primera test_suite.py se borraban tras escribirse. Antes
+  se atribuyo a "corrupcion del mount" (sintoma, no causa).
+- Fix: tests/test_suite.py NO almacena firmas crudas. Reutiliza el corpus (base64)
+  para las muestras inertes y usa solo PHP benigno en los casos unitarios. Asi el
+  archivo persiste en disco y verify.py descubre las pruebas.
+
+Pruebas
+- tests/test_suite.py reconstruida: 14 pruebas unittest (corpus valido; deteccion de
+  las 5 muestras inertes; is_php_functional; cero FP en control; integridad por hash
+  en NORMAL e INTERMEDIO; eficacia ESTRICTO elimina las 5; INTERMEDIO elimina el
+  webshell de raiz; NORMAL barre el .php de uploads).
+- verify.py: 4/4 PASS (compile, import, lint_lite 0, unittest 14/14) en copia
+  consistente /tmp.
+
+Recomendacion operativa
+- Excluir la carpeta del proyecto en el antivirus, o mantener la convencion de no
+  escribir firmas crudas en el repo (solo base64 via build_corpus).
+
+APP_VERSION 3.1.1 -> 3.1.2.
+
 ## v3.1.1 (2026-06-19)
 
 Recuperacion de la suite de pruebas y endurecimiento de la verificacion. Sin
@@ -11,12 +67,22 @@ Correcciones
 - tests/test_cpacleans.py se habia perdido (bloques corruptos en disco: la entrada
   de directorio existia pero el archivo era ilegible; nunca commiteado a git).
   Efecto: `unittest discover` corria 0 pruebas y verify.py daba PASS falso. Suite
-  reconstruida contra el corpus determinista: 13 pruebas (corpus valido, cero FP en
-  control limpio, deteccion de las 5 muestras inertes, regla .htaccess
+  reconstruida en tests/test_suite.py (ruta nueva: la corrupta no se pudo borrar
+  desde el entorno) contra el corpus determinista: 13 pruebas (corpus valido, cero
+  FP en control limpio, deteccion de las 5 muestras inertes, regla .htaccess
   sospechoso-no-confirmado, integridad por hash en modos NORMAL e INTERMEDIO,
-  unidad de patrones webshell/backdoor e is_php_functional).
+  unidad de patrones webshell/backdoor e is_php_functional). Borrar manualmente en
+  Windows el archivo corrupto tests/test_cpacleans.py.
 - tools/verify.py: el paso unittest ahora FALLA si tests/ no existe o si se
   descubren 0 pruebas (antes pasaba en silencio); reporta el conteo de pruebas.
+
+Empaquetado y entrega (Windows)
+- Build ya existente revisado: main.py -> src.gui.app, cPacleanS.spec (onefile,
+  windowed, assets/icon.ico) y build.py (instala deps + compila a dist/cPacleanS.exe).
+- Nuevos scripts: build_exe.bat (verify + build), release_v3.1.1.bat (tag + gh
+  release create + upload + gh release view) y RELEASE_NOTES_v3.1.1.md. El .exe y el
+  release se generan/publican en Windows (PyInstaller no cross-compila; gh requiere
+  red y credenciales).
 
 Comportamiento medido (documentado, sin cambio de codigo)
 - Las muestras inertes minimas puntuan 55 (<70 umbral), por lo que no quedan

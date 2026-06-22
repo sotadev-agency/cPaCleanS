@@ -480,8 +480,13 @@ class DBCleaner:
     def _extract_post_rows(self, sql_path: str, posts_table: str) -> list:
         """Extrae filas de la tabla posts como dicts simplificados."""
         rows = []
+        # v3.1.3 fix: consumir la lista de columnas opcional y VALUES, igual que
+        # _collect_wp_users/_extract_comment_rows. Sin esto, "VALUES " quedaba como
+        # prefijo de la PRIMERA tupla y _parse_post_tuple la descartaba: el primer
+        # post de cada INSERT nunca se analizaba (hueco de deteccion de spam).
         insert_re = re.compile(
-            rf"INSERT\s+INTO\s+`?{re.escape(posts_table)}`?\s+",
+            rf"INSERT\s+INTO\s+`?{re.escape(posts_table)}`?\s+"
+            rf"(?:\([^)]*\)\s*)?VALUES\s*",
             re.IGNORECASE
         )
         try:

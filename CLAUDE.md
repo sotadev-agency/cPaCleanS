@@ -1,7 +1,7 @@
 # CLAUDE.md — guia para sesiones de Claude en cPacleanS
 
-Leer ANTES de modificar. Complementa CONTEXTO_PROYECTO.md (arquitectura) y
-ESTADO.md (estado vivo). Texto pragmatico, sin iconos.
+Leer ANTES de modificar. Complementa ESTADO.md (estado vivo) y CONTEXTO_PROYECTO.md
+(arquitectura, en recursos-generados/documentacion_interna/). Pragmatico, sin iconos.
 
 ## Que es
 Herramienta de escritorio (Windows, Python 3.10+ / CustomTkinter) que escanea y
@@ -30,7 +30,7 @@ En Windows con red, complementar: ruff check src && pytest -q
   (PHP_PATTERNS, JS_PATTERNS, HTACCESS_PATTERNS). Si la deteccion debe auto-limpiar
   en modo Normal, la categoria debe estar en CONFIRMED_MALWARE_CATEGORIES
   (src/core/engine.py) y el score total superar 70.
-- Tras anadir, agregar una prueba en tests/test_cpacleans.py y correr verify.
+- Tras anadir, agregar una prueba en tests/test_suite.py y correr verify.
 
 ## Optimizacion de tokens / metodo
 - Editar por diffs; no volcar archivos completos.
@@ -41,3 +41,6 @@ En Windows con red, complementar: ruff check src && pytest -q
 - Sin red: no se instalan pytest/ruff/yara/clamav; se usa la toolchain stdlib.
 - El mount puede tener latencia de lectura tras escribir; verificar contenido en el
   host con Grep/Read y, para correr pruebas, trabajar sobre una copia local en /tmp.
+- ANTIVIRUS del host: cuarentena archivos con firmas crudas tipo webshell. Nunca
+  escribir firmas literales en el repo (tests incluidos); usar payloads base64 via
+  tests/fixtures/build_corpus.py. Asi se recupero la suite perdida (v3.1.2).
