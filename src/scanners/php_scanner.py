@@ -1,6 +1,10 @@
 """Escáner de archivos PHP, HTML, CSS, JS — detecta shells, backdoors, inyecciones."""
 import re
 import os
+import base64
+import binascii
+import zlib
+import codecs
 from pathlib import Path
 from ..core.engine import Finding
 from ..config.settings import (
@@ -185,6 +189,41 @@ def is_php_functional(content: str) -> bool:
     return False
 
 
+# ── v3.1.5: deteccion heuristica (multi-linea + desofuscacion) ──────────────
+# Construcciones de ejecucion que pueden partirse en varias lineas (evasion del
+# escaneo linea-a-linea): se buscan sobre TODO el contenido.
+_MULTILINE_EXEC = [
+    ("critical", "webshell",
+     re.compile(r'\b(?:eval|assert|create_function)\s*\(\s*'
+                r'(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|hex2bin|convert_uudecode)\s*\(',
+                re.IGNORECASE),
+     "Ejecucion con decodificacion (posible evasion multi-linea)"),
+    ("critical", "backdoor",
+     re.compile(r'\b(?:eval|assert)\s*\(\s*\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b', re.IGNORECASE),
+     "eval() de entrada del usuario (multi-linea)"),
+    ("critical", "webshell",
+     re.compile(r'\$_(?:GET|POST|REQUEST|COOKIE)\s*\[[^\]]{0,40}\]\s*\(', re.IGNORECASE),
+     "Funcion tomada de una superglobal (shell dinamico)"),
+]
+
+# Blobs codificados literales dentro del codigo. Umbral bajo (16) porque los payloads
+# reales suelen ser cortos; la especificidad la aporta _DECODED_MALWARE, no la longitud.
+_B64_LITERAL = re.compile(r"""['"]([A-Za-z0-9+/]{16,}={0,2})['"]""")
+_HEX_LITERAL = re.compile(r"""['"]([0-9a-fA-F]{40,})['"]""")
+
+# Indicadores de payload YA DECODIFICADO (alta especificidad, casi cero FP): solo se
+# evaluan sobre el resultado de decodificar un blob, no sobre el fuente normal.
+_DECODED_MALWARE = re.compile(
+    r'(?:eval|assert|create_function)\s*\(\s*\$_(?:GET|POST|REQUEST|COOKIE)'
+    r'|(?:system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec)\s*\('
+    r'|\$_(?:GET|POST|REQUEST|COOKIE)\s*\[[^\]]{0,40}\]\s*\('
+    r'|preg_replace\s*\(\s*[\'"][^\'"]{0,120}/[a-z]*e[\'"]'
+    r'|(?:eval|assert)\s*\(\s*(?:base64_decode|gzinflate|gzuncompress|str_rot13|gzdecode)\s*\('
+    r'|(?:FilesMan|c99shell|r57shell|b374k|IndoXploit|phpspy|WSOshell)',
+    re.IGNORECASE,
+)
+
+
 class PHPScanner:
     name = "PHP/Web Scanner"
 
@@ -283,6 +322,10 @@ class PHPScanner:
                                 context=ctx,
                             ))
 
+        if ext in (".php", ".php5", ".php7", ".phtml", ".phar", ".html", ".htm", ".js"):
+            self._scan_multiline(content, file_path, findings)
+            self._scan_deobfuscated(content, file_path, findings)
+
         self._check_suspicious_filenames(file_path, findings)
         if findings:
             findings = self._apply_whitelist(file_path, name, content_lower, findings)
@@ -377,6 +420,77 @@ class PHPScanner:
                 category="double_extension",
                 description="Doble extensión — posible archivo disfrazado",
             ))
+
+    def _scan_multiline(self, content, file_path, findings):
+        """Ejecucion partida en varias lineas (el pase linea-a-linea no la ve)."""
+        seen = {(f.category, f.line_number) for f in findings}
+        for sev, cat, rx, desc in _MULTILINE_EXEC:
+            m = rx.search(content)
+            if not m:
+                continue
+            line_no = content.count("\n", 0, m.start()) + 1
+            if (cat, line_no) in seen:
+                continue
+            seen.add((cat, line_no))
+            findings.append(Finding(
+                file_path=file_path, line_number=line_no, severity=sev,
+                category=cat, description=desc,
+                matched_pattern="multiline", context=m.group(0)[:160],
+            ))
+
+    def _scan_deobfuscated(self, content, file_path, findings):
+        """Decodifica blobs base64/hex (con posible capa gz/rot13) y re-escanea el
+        payload. Solo marca si el contenido DECODIFICADO contiene ejecucion real,
+        por lo que blobs benignos (imagenes, JSON, tokens) no generan hallazgos."""
+        blobs = []
+        for m in _B64_LITERAL.finditer(content):
+            blobs.append(("base64", m.group(1)))
+            if len(blobs) >= 25:
+                break
+        for m in _HEX_LITERAL.finditer(content):
+            blobs.append(("hex", m.group(1)))
+            if len(blobs) >= 45:
+                break
+        hits = 0
+        for kind, blob in blobs:
+            if len(blob) > 300000:
+                continue
+            for decoded in self._decode_layers(kind, blob):
+                if _DECODED_MALWARE.search(decoded):
+                    findings.append(Finding(
+                        file_path=file_path, line_number=0, severity="critical",
+                        category="webshell",
+                        description="Payload de ejecucion oculto tras desofuscar (base64/gz/hex/rot13)",
+                        matched_pattern="deobfuscated",
+                        context=decoded[:160].replace("\n", " "),
+                    ))
+                    hits += 1
+                    break
+            if hits >= 5:
+                break
+
+    @staticmethod
+    def _decode_layers(kind, blob):
+        """Textos decodificados (1-2 capas) a inspeccionar. Nunca lanza."""
+        raws = []
+        try:
+            if kind == "base64":
+                raws.append(base64.b64decode(blob, validate=True))
+            else:
+                raws.append(bytes.fromhex(blob))
+        except (binascii.Error, ValueError):
+            try:  # por si el base64 va rotado con rot13
+                raws.append(base64.b64decode(codecs.decode(blob, "rot_13"), validate=True))
+            except (binascii.Error, ValueError, UnicodeDecodeError):
+                return []
+        extra = []
+        for r in raws:
+            wbits = 47 if r[:2] == b"\x1f\x8b" else -15
+            try:
+                extra.append(zlib.decompress(r, wbits))
+            except zlib.error:
+                pass
+        return [r.decode("utf-8", errors="replace") for r in raws + extra]
 
     def can_clean(self, finding: Finding) -> bool:
         return finding.category in ("webshell", "backdoor", "suspicious_filename", "double_extension")

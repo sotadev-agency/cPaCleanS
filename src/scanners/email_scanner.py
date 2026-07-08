@@ -52,6 +52,16 @@ CODE_REINFECTION_PATTERNS = [
 ]
 
 
+# v3.1.5: firmas de payload en partes MIME YA DECODIFICADAS (alta especificidad).
+_DECODED_MAIL = re.compile(
+    r'<\?php'
+    r'|(?:eval|assert)\s*\(\s*(?:base64_decode|gzinflate|\$_(?:GET|POST|REQUEST|COOKIE))'
+    r'|<script[^>]*src\s*=\s*[\'"]https?://'
+    r'|(?:system|shell_exec|passthru|exec|proc_open)\s*\(',
+    re.IGNORECASE,
+)
+
+
 class EmailScanner:
     name = "Email Scanner"
 
@@ -64,10 +74,16 @@ class EmailScanner:
         ext = fp.suffix.lower()
         fp_str = str(fp).replace("\\", "/").lower()
 
-        # Escanear correos
+        # Escanear correos: solo dentro de un arbol de correo real (cPanel homedir/mail/
+        # o Maildir). Antes bastaba el substring '/tmp/'|'/new/'|'/cur/', lo que hacia
+        # que la raiz de extraccion (/tmp) o una carpeta tmp/ del propio sitio activaran
+        # el escaneo de correo sobre PHP legitimo -> falso positivo masivo de
+        # reinfection_risk ("Codigo PHP embebido en correo"). Los mensajes Maildir de
+        # cPanel viven bajo homedir/mail/.../{cur,new,tmp} y quedan cubiertos por "/mail/".
         is_email = (
             ext in (".eml", ".mbox")
-            or any(part in fp_str for part in ("/mail/", "/cur/", "/new/", "/tmp/", "/maildir/"))
+            or "/mail/" in fp_str
+            or "/maildir/" in fp_str
         )
 
         # Escanear codigo propio (fuera de CMS core)
@@ -172,6 +188,36 @@ class EmailScanner:
                         description=f"Adjunto peligroso: {fn}",
                         context=f"Content-Type: {part.get_content_type()}",
                     ))
+
+            try:
+                payload = part.get_payload(decode=True)
+            except (ValueError, TypeError, LookupError):
+                payload = None
+            if payload:
+                self._scan_decoded_payload(file_path, payload, findings)
+
+    def _scan_decoded_payload(self, file_path, data, findings):
+        """Inspecciona una parte MIME ya decodificada: ejecutables (PE/ELF) o
+        payloads script/PHP ocultos por codificacion base64. Alta especificidad."""
+        if not data:
+            return
+        if data[:2] == b"MZ" or data[:4] == b"\x7fELF":
+            findings.append(Finding(
+                file_path=file_path, severity="critical",
+                category="malicious_attachment",
+                description="Ejecutable (PE/ELF) en parte decodificada del correo",
+                context="cabecera binaria ejecutable",
+            ))
+            return
+        text = data[:200000].decode("utf-8", errors="replace")
+        m = _DECODED_MAIL.search(text)
+        if m:
+            findings.append(Finding(
+                file_path=file_path, severity="high",
+                category="reinfection_risk",
+                description="Payload script/PHP en parte decodificada del correo",
+                context=m.group(0)[:120],
+            ))
 
     def _extract_domain(self, addr: str) -> str:
         match = re.search(r'@([\w.-]+)', addr)

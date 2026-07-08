@@ -36,6 +36,10 @@ class BackupInfo:
     all_domains: list = field(default_factory=list)
 
 
+class ExtractionCancelled(Exception):
+    """La extraccion fue interrumpida por el usuario."""
+
+
 class BackupExtractor:
     CPANEL_MARKERS = {
         "mysql": ["mysql", "mysql.sql", "backup/mysql"],
@@ -54,6 +58,11 @@ class BackupExtractor:
         self.progress_callback = progress_callback or (lambda *a: None)
         self.extract_dir = None
         self._errors = []
+        self._cancelled = False
+
+    def cancel(self):
+        """Marca la extraccion para que se interrumpa lo antes posible."""
+        self._cancelled = True
 
     @classmethod
     def validate(cls, backup_path: str) -> dict:
@@ -156,6 +165,9 @@ class BackupExtractor:
         else:
             raise ValueError(f"Formato no soportado: {name}")
 
+        if self._cancelled:
+            raise ExtractionCancelled("Extraccion cancelada por el usuario")
+
         return self._analyze_structure()
 
     def _extract_member_safe(self, tar, member, dest):
@@ -190,6 +202,8 @@ class BackupExtractor:
             members = tar.getmembers()
             total = len(members)
             for i, member in enumerate(members):
+                if self._cancelled:
+                    return
                 if self._is_safe_path(member.name):
                     self._extract_member_safe(tar, member, self.extract_dir)
                 pct = int((i + 1) / total * 100) if total else 0
@@ -202,6 +216,8 @@ class BackupExtractor:
             members = tar.getmembers()
             total = len(members)
             for i, member in enumerate(members):
+                if self._cancelled:
+                    return
                 if self._is_safe_path(member.name):
                     self._extract_member_safe(tar, member, self.extract_dir)
                 pct = int((i + 1) / total * 100) if total else 0
@@ -214,6 +230,8 @@ class BackupExtractor:
             members = zf.namelist()
             total = len(members)
             for i, name in enumerate(members):
+                if self._cancelled:
+                    return
                 if self._is_safe_path(name):
                     try:
                         zf.extract(name, str(self.extract_dir))

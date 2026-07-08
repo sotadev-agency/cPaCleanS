@@ -14,7 +14,7 @@ from ..config.settings import (
     load_config, save_config, APP_NAME, APP_VERSION,
     SCAN_MODE_ONLY, CLEAN_MODE_NORMAL, CLEAN_MODE_INTERMEDIATE, CLEAN_MODE_STRICT,
 )
-from ..core.extractor import BackupExtractor
+from ..core.extractor import BackupExtractor, ExtractionCancelled
 from ..core.engine import ScanEngine
 from ..scanners.php_scanner import PHPScanner
 from ..scanners.database_scanner import DatabaseScanner
@@ -96,12 +96,14 @@ class CpacleanSApp(ctk.CTk):
         self.title(f"{APP_NAME} v{APP_VERSION}")
         self.geometry("1150x800")
         self.minsize(960, 680)
+        self._center_on_screen(1150, 800)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         self.configure(fg_color=BG_MAIN)
 
         self._scan_thread = None
         self._engine = None
+        self._extractor = None
         self._backup_info = None
         self._scan_result = None
         self._report_path = None
@@ -681,7 +683,14 @@ class CpacleanSApp(ctk.CTk):
             self._safe_status("Extrayendo backup...")
             extractor = BackupExtractor(backup_path,
                 progress_callback=lambda t, v: self.after(0, lambda: self._update_progress(t, v)))
-            self._backup_info = extractor.extract()
+            self._extractor = extractor
+            try:
+                self._backup_info = extractor.extract()
+            except ExtractionCancelled:
+                self._safe_warn("Extraccion cancelada por el usuario")
+                self._set_phase(1, "error")
+                self.after(0, self._unlock_ui)
+                return
             info = self._backup_info
             self._safe_result(f"Extraído: {info.total_files} archivos, {info.total_size_mb} MB")
             self._safe_detail(f"Usuario cPanel: {info.cpanel_user or 'N/A'}")
@@ -1105,12 +1114,27 @@ class CpacleanSApp(ctk.CTk):
 
     # ─────────────────────────── CANCEL ───────────────────────────────────
 
+    def _center_on_screen(self, w, h):
+        """Centra la ventana en el monitor primario. Evita que la app abra fuera
+        de pantalla si el gestor de ventanas restaura una geometria antigua."""
+        try:
+            self.update_idletasks()
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(0, (sw - w) // 2)
+            y = max(0, (sh - h) // 2)
+            self.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            pass
+
     def _cancel_scan(self):
+        if getattr(self, "_extractor", None):
+            self._extractor.cancel()
         if self._engine:
             self._engine.cancel()
-            self._log("\n  >> Cancelado por el usuario", "warning")
-            self.status_label.configure(text="Cancelado", text_color=YELLOW)
-            self._unlock_ui()
+        self._log("\n  >> Cancelado por el usuario", "warning")
+        self.status_label.configure(text="Cancelado", text_color=YELLOW)
+        self._unlock_ui()
 
     # ─────────────────────────── PACKAGING ────────────────────────────────
 

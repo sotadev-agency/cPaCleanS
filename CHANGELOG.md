@@ -2,6 +2,66 @@
 
 Versionado semantico. Formato: cambios por version, mas recientes arriba.
 
+## v3.1.5 (2026-07-05)
+
+Endurecimiento de deteccion tras revisar limitaciones de la deteccion por firmas
+(amenazas nuevas/ofuscadas). Amplia cobertura SIN bajar el umbral de confianza (70)
+y SIN romper cero falsos positivos (verify 4/4, 38 pruebas; corpus legitimo sin
+hallazgos; caso benigno base64 no marcado).
+
+Deteccion (nuevo)
+- src/scanners/php_scanner.py: desofuscacion (decode-and-rescan). Decodifica blobs
+  base64/hex literales (con capa opcional gzinflate/gzip/rot13) y re-escanea el
+  PAYLOAD con patrones de ejecucion de alta especificidad (_DECODED_MALWARE). Revela
+  variantes que reencodifican payloads conocidos aunque el fuente solo muestre el
+  blob. Solo marca si el contenido decodificado ejecuta, por lo que blobs benignos
+  (imagenes, JSON, tokens) no generan hallazgos.
+- src/scanners/php_scanner.py: pase multilinea (_scan_multiline) que busca sobre TODO
+  el contenido las construcciones de ejecucion (eval/assert + decode; eval de
+  superglobal; funcion tomada de una superglobal). Detecta el malware que reparte la
+  llamada en varias lineas para evadir el escaneo linea-a-linea.
+- src/scanners/email_scanner.py: decodifica cada parte MIME (get_payload(decode=True))
+  y marca ejecutables (cabecera PE/ELF) o payloads script/PHP ocultos por base64 en el
+  cuerpo o adjuntos del correo.
+
+Pruebas (+4 => 38): tests/test_deobfuscation.py — payload base64 anidado detectado;
+ejecucion partida en lineas detectada; base64 benigno NO marcado (cero FP); parte de
+correo base64 con PHP detectada. Sin firmas crudas (reutiliza el corpus base64).
+
+Nota: reduce las brechas de "amenazas ofuscadas / nuevas variantes", pero un escaner
+por patrones no sustituye analisis dinamico; para binarios conviene complementar con
+un AV (ClamAV) y las reglas YARA ya integradas.
+
+Pendiente (manual, Windows): recompilar dist/cPacleanS.exe a 3.1.5 (build_exe.bat).
+
+## v3.1.4 (2026-07-04)
+
+Correcciones surgidas de la prueba GUI real de v3.1.3 en Windows. Sin cambios en el
+umbral de deteccion; la regla de cero falsos positivos se mantiene (verify 4/4, 34
+pruebas, +3 nuevas de EmailScanner).
+
+Fix (falso positivo)
+- src/scanners/email_scanner.py: `is_email` ya no se activa por el substring suelto
+  '/tmp/' | '/new/' | '/cur/'. Antes, extraer a una ruta con '/tmp/' (o una carpeta
+  tmp/ del propio sitio) hacia que TODO archivo PHP se tratara como correo y cada
+  '<?php' se marcara reinfection_risk ("Codigo PHP embebido en correo"). Ahora solo es
+  correo lo que esta bajo un arbol real: extension .eml/.mbox, o ruta con '/mail/'
+  (Maildir de cPanel) o '/maildir/'. Nueva prueba: tests/test_email_scanner.py (3 casos).
+
+Fix (cancelacion)
+- src/core/extractor.py + src/gui/app.py: CANCELAR ahora interrumpe TAMBIEN la fase de
+  extraccion. BackupExtractor tiene bandera `_cancelled`/`cancel()` que se comprueba por
+  archivo; `extract()` lanza `ExtractionCancelled`. Ademas `_cancel_scan` cancela el
+  extractor y ya no depende de `self._engine` (que es None durante la extraccion, por lo
+  que antes no hacia nada en esa fase).
+
+Fix (UI)
+- src/gui/app.py: la ventana se centra en el monitor primario al abrir
+  (`_center_on_screen`), evitando que aparezca fuera de pantalla si el gestor de ventanas
+  restaura una geometria antigua.
+
+Pendiente (manual, Windows): recompilar dist/cPacleanS.exe a 3.1.4 (build_exe.bat).
+
 ## v3.1.3 (2026-06-21)
 
 Cobertura de los cleaners de BD (antes sin pruebas) y correccion de un hueco de
