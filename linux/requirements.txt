@@ -1,0 +1,13 @@
+customtkinter>=5.2.0
+yara-python>=4.3.0
+requests>=2.31.0
+jinja2>=3.1.2
+chardet>=5.2.0
+python-magic>=0.4.27
+colorama>=0.4.6
+tqdm>=4.66.0
+pyinstaller>=6.0.0
+Pillow>=10.0.0
+fpdf2>=2.8.0
+psutil>=5.9.0
+phpserialize>=1.3

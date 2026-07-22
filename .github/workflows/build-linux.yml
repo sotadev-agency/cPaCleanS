@@ -1,0 +1,75 @@
+name: Build Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag del release a crear/actualizar (ej. linux-v3.1.6). Vacio = solo build + artifact.'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'linux-v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Dependencias del sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk libmagic1 xvfb
+
+      - name: Dependencias de Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint + tests (sin GUI)
+        run: |
+          python tools/lint_lite.py src
+          python -m unittest discover tests -v
+
+      - name: Compilar binario
+        run: python build_linux.py
+
+      - name: Empaquetar tar.gz (binario + install.sh + icono + .desktop)
+        run: |
+          mkdir -p package/cPacleanS-linux
+          cp dist/cPacleanS package/cPacleanS-linux/
+          cp -r packaging package/cPacleanS-linux/
+          cp -r assets package/cPacleanS-linux/
+          cp README_LINUX.md package/cPacleanS-linux/
+          chmod +x package/cPacleanS-linux/cPacleanS package/cPacleanS-linux/packaging/install.sh
+          tar -C package -czf cPacleanS-linux.tar.gz cPacleanS-linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cPacleanS-linux
+          path: |
+            linux/dist/cPacleanS
+            linux/cPacleanS-linux.tar.gz
+
+      - name: Crear/actualizar release
+        if: startsWith(github.ref, 'refs/tags/linux-v') || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+          gh release create "$TAG" \
+            "cPacleanS-linux.tar.gz" \
+            --repo "${{ github.repository }}" \
+            --title "cPacleanS Linux $TAG" \
+            --notes "Build Linux de cPacleanS (ver linux/README_LINUX.md). Compilado automaticamente en ubuntu-latest via GitHub Actions." \
+            --latest=false \
+            || gh release upload "$TAG" "cPacleanS-linux.tar.gz" --repo "${{ github.repository }}" --clobber

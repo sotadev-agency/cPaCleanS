@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=cPacleanS
+GenericName=Limpiador de malware para backups cPanel
+Comment=Escanea y limpia backups de cPanel (webshells, macros, ejecutables disfrazados)
+Exec=__INSTALL_BIN__
+Icon=cpacleans
+Terminal=false
+Categories=Utility;Security;
+StartupWMClass=cPacleanS
