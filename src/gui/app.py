@@ -21,6 +21,7 @@ from ..scanners.database_scanner import DatabaseScanner
 from ..scanners.email_scanner import EmailScanner
 from ..scanners.cms_scanner import CMSScanner
 from ..scanners.yara_scanner import YaraScanner
+from ..scanners.executable_scanner import ExecutableScanner
 from ..api.virustotal import VirusTotalClient
 from ..report.generator import ReportGenerator
 from ..core.cms_restorer import CMSRestorer
@@ -32,7 +33,7 @@ from ..cleaners.junk_cleaner import JunkCleaner
 from ..cleaners.wordpress_cleaner import WordPressCleaner
 from ..utils.db_utils import detect_prefix_from_config, detect_prefix_from_dump
 
-SCANNER_CLASSES = [PHPScanner, DatabaseScanner, EmailScanner, CMSScanner, YaraScanner]
+SCANNER_CLASSES = [PHPScanner, DatabaseScanner, EmailScanner, CMSScanner, YaraScanner, ExecutableScanner]
 
 MODE_LABELS = {
     SCAN_MODE_ONLY:          "Solo Escaneo",

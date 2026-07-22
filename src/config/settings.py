@@ -5,7 +5,7 @@ import multiprocessing
 from pathlib import Path
 
 APP_NAME = "cPacleanS"
-APP_VERSION = "3.1.5"
+APP_VERSION = "3.1.6"
 
 # Directorios de cPanel que WHM necesita para restaurar dominios correctamente.
 # Nunca deben ser cuarentenados aunque contengan patrones sospechosos.

@@ -19,7 +19,7 @@ from ..config.settings import (
 CONFIRMED_MALWARE_CATEGORIES = {
     "webshell", "backdoor", "cryptominer", "dropper",
     "cms_upload_php", "cms_htaccess_override", "cms_index_hijack",
-    "cms_ini_injection", "double_extension",
+    "cms_ini_injection", "double_extension", "disguised_executable",
     "malicious_attachment",
     "htaccess_redirect", "htaccess_handler", "htaccess_php",
     "mailer_backdoor",  # v2.6.5: cfg.php con SPAM relay / phishing

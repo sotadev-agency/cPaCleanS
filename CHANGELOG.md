@@ -2,6 +2,38 @@
 
 Versionado semantico. Formato: cambios por version, mas recientes arriba.
 
+## v3.1.6 (2026-07-21)
+
+Nuevo scanner: cubre denominaciones de malware reportadas (observaciones de prueba)
+que el motor no reconocia por operar solo sobre PHP/JS/HTML y MIME de correo —
+ejecutables Windows sueltos, macros de Office y exploits de documento que aparecen
+como adjuntos/uploads dentro de un backup cPanel.
+
+Deteccion (nuevo)
+- src/scanners/executable_scanner.py (ExecutableScanner, registrado en SCANNER_CLASSES):
+  - Doble extension documento+ejecutable (ej. comprobante.pdf.exe) -> `double_extension`.
+  - Extension ejecutable/script de alto riesgo (.exe/.scr/.com/.pif/.cpl/.msi/.vbs/.vbe/
+    .jse/.wsf/.wsh/.hta/.bat/.cmd) dentro de contenido web/correo -> `malicious_attachment`.
+  - Ejecutable (cabecera PE "MZ") con extension no ejecutable (.tmp/.dat/.bin/etc.)
+    -> `disguised_executable`.
+  - Firma de binario compilado con AutoIt (Formbook/Agensla/AutoIt-injectors).
+  - Script .au3 con llamadas Run/ShellExecute/InetGet/FileInstall/DllCall -> alto;
+    presencia sin llamadas peligrosas -> medio (sin uso legitimo en hosting web).
+  - RTF con objeto OLE Equation Editor embebido (patron CVE-2017-11882 / CVE-2018-0802).
+  - Documentos Office (OLE legacy y OOXML via vbaProject.bin) con macro autoejecutable
+    (AutoOpen/Document_Open/etc.) + llamadas de descarga/ejecucion (downloader).
+  - PDF con accion /Launch, archivo embebido ejecutable, o JS con codificacion sospechosa.
+  - ZIP con ejecutable (PE) embebido en alguno de sus miembros.
+  - XML con namespace msxsl:script o language=JScript/VBScript (tecnica Squiblydoo).
+  - Alcance restringido a rutas web/correo (uploads, wp-content, public_html, mail/
+    maildir, etc.), excluyendo vendor/node_modules/.git — evita falsos positivos sobre
+    el resto de un backup completo de cPanel.
+- src/core/engine.py: `disguised_executable` anadida a CONFIRMED_MALWARE_CATEGORIES.
+
+Pruebas: tests/test_executable_scanner.py (12 pruebas nuevas) — deteccion positiva de
+cada patron + casos benignos (dat sin cabecera PE, zip sin ejecutables, xml sin script,
+exe fuera del arbol web) sin hallazgos.
+
 ## v3.1.5 (2026-07-05)
 
 Endurecimiento de deteccion tras revisar limitaciones de la deteccion por firmas
